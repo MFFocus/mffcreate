@@ -3,7 +3,9 @@ uvicorn>=0.30.0
 pydantic>=2.8.0
 python-multipart>=0.0.9
 httpx>=0.27.0
+requests>=2.31.0
 yt-dlp>=2026.8.19
+youtube-transcript-api>=1.2.0
 imageio-ffmpeg>=0.5.1
 opencv-python>=4.10.0
 Pillow>=10.4.0
@@ -12,3 +14,4 @@ rapidocr-onnxruntime>=1.2.0
 faster-whisper>=1.0.0
 aiosqlite>=0.20.0
 pytest>=8.0.0
+

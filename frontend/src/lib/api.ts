@@ -94,7 +94,7 @@ export type JobStatus =
   | 'processing';
 
 export interface Capabilities {
-  media_status: 'video_available' | 'captions_only' | 'failed';
+  media_status: 'video_available' | 'captions_only' | 'unavailable' | 'failed';
   video_available: boolean;
   transcript_available: boolean;
   visual_analysis_available: boolean;
@@ -116,7 +116,7 @@ export interface Project {
   current_timestamp?: number;
   error?: string;
   error_code?: string;
-  media_status?: 'video_available' | 'captions_only' | 'failed';
+  media_status?: 'video_available' | 'captions_only' | 'unavailable' | 'failed';
   capabilities?: Capabilities;
   metrics?: ProjectMetrics;
   created_at: string;

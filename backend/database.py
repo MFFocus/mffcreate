@@ -259,8 +259,8 @@ def _format_project_row(row: sqlite3.Row) -> Dict[str, Any]:
     stored_media_status = d.get("media_status")
     has_video_path = bool(d.get("video_path"))
 
-    if status == "failed":
-        effective_media_status = "failed"
+    if status == "failed" or stored_media_status == "unavailable":
+        effective_media_status = "unavailable"
         video_avail = False
         trans_avail = False
         vis_avail = False

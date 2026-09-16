@@ -412,14 +412,16 @@ def test_youtube_bot_check_restriction():
     assert "temporarily limiting automated access" in err.user_message
 
     p_id = "bot_check_test"
+    delete_project(p_id)
     create_project(p_id, "Blocked Lecture", "url")
     update_job_stage(p_id, "failed", err.user_message, 0, error=str(err), error_code=err.error_code)
 
     proj = get_project(p_id)
     assert proj["status"] == "failed"
     assert proj["error_code"] == "YOUTUBE_BOT_CHECK"
+    assert proj["media_status"] == "unavailable"
     assert proj["capabilities"] == {
-        "media_status": "failed",
+        "media_status": "unavailable",
         "video_available": False,
         "transcript_available": False,
         "visual_analysis_available": False
@@ -433,13 +435,14 @@ def test_private_video_error():
     from unittest.mock import patch
 
     dl = MediaDownloader(backend_dir / "data" / "projects")
-    with patch.object(dl, "_extract_with_fallback", side_effect=Exception("ERROR: [youtube] abc: This video is private.")):
-        try:
-            dl.download_url("https://www.youtube.com/watch?v=private123", "proj_priv")
-            assert False, "Should have raised VideoPrivateError"
-        except VideoPrivateError as e:
-            assert e.error_code == "VIDEO_PRIVATE"
-            assert "private" in e.user_message.lower()
+    with patch.object(dl, "acquire_independent_captions", return_value=None):
+        with patch.object(dl, "_extract_with_fallback", side_effect=Exception("ERROR: [youtube] abc: This video is private.")):
+            try:
+                dl.download_url("https://www.youtube.com/watch?v=private123", "proj_priv")
+                assert False, "Should have raised VideoPrivateError"
+            except VideoPrivateError as e:
+                assert e.error_code == "VIDEO_PRIVATE"
+                assert "private" in e.user_message.lower()
     print("[PASS] test_private_video_error")
 
 def test_unavailable_video_error():
@@ -447,13 +450,14 @@ def test_unavailable_video_error():
     from unittest.mock import patch
 
     dl = MediaDownloader(backend_dir / "data" / "projects")
-    with patch.object(dl, "_extract_with_fallback", side_effect=Exception("ERROR: [youtube] abc: Video unavailable. This video has been removed.")):
-        try:
-            dl.download_url("https://www.youtube.com/watch?v=unavail123", "proj_unavail")
-            assert False, "Should have raised VideoUnavailableError"
-        except VideoUnavailableError as e:
-            assert e.error_code == "VIDEO_UNAVAILABLE"
-            assert "unavailable" in e.user_message.lower()
+    with patch.object(dl, "acquire_independent_captions", return_value=None):
+        with patch.object(dl, "_extract_with_fallback", side_effect=Exception("ERROR: [youtube] abc: Video unavailable. This video has been removed.")):
+            try:
+                dl.download_url("https://www.youtube.com/watch?v=unavail123", "proj_unavail")
+                assert False, "Should have raised VideoUnavailableError"
+            except VideoUnavailableError as e:
+                assert e.error_code == "VIDEO_UNAVAILABLE"
+                assert "unavailable" in e.user_message.lower()
     print("[PASS] test_unavailable_video_error")
 
 def test_no_caption_no_video_failure():
@@ -461,22 +465,15 @@ def test_no_caption_no_video_failure():
     from unittest.mock import patch
 
     dl = MediaDownloader(backend_dir / "data" / "projects")
-    # Simulate both video download bot error AND metadata having no captions
-    with patch.object(dl, "_extract_with_fallback") as mock_extract:
-        # Call 1 (pre-check): basic metadata
-        # Call 2 (full download): bot check failure
-        # Call 3 (caption fallback): metadata without subtitles
-        mock_extract.side_effect = [
-            {"title": "No Captions Video", "duration": 120},
-            Exception("ERROR: [youtube] test: Sign in to confirm you’re not a bot."),
-            {"title": "No Captions Video", "duration": 120, "subtitles": {}, "automatic_captions": {}}
-        ]
-        try:
-            dl.download_url("https://www.youtube.com/watch?v=nocaptions", "proj_nocap")
-            assert False, "Should have raised YouTubeBotCheckError"
-        except YouTubeBotCheckError as e:
-            assert e.error_code == "YOUTUBE_BOT_CHECK"
-            assert "temporarily limiting automated access" in e.user_message
+    # Simulate both independent captions and binary video download failing with bot check
+    with patch.object(dl, "acquire_independent_captions", return_value=None):
+        with patch.object(dl, "_extract_with_fallback", side_effect=Exception("ERROR: [youtube] test: Sign in to confirm you’re not a bot.")):
+            try:
+                dl.download_url("https://www.youtube.com/watch?v=nocaptions", "proj_nocap")
+                assert False, "Should have raised YouTubeBotCheckError"
+            except YouTubeBotCheckError as e:
+                assert e.error_code == "YOUTUBE_BOT_CHECK"
+                assert "temporarily limiting automated access" in e.user_message
     print("[PASS] test_no_caption_no_video_failure")
 
 def test_failed_player_response_regression():
@@ -492,6 +489,34 @@ def test_failed_player_response_regression():
 
     print("[PASS] test_failed_player_response_regression")
 
+def test_video_blocked_captions_success_e2e():
+    """
+    Scenario: Binary video acquisition is blocked by 'Failed to extract any player response'
+    (the exact error from the Render logs for Z_gV1hEqlA8), but independent caption
+    acquisition succeeds via Innertube Android endpoint.
+    Verifies that the downloader returns a valid captions_only workspace without failing.
+    """
+    from services.downloader import MediaDownloader
+    from unittest.mock import patch
+    import shutil
+
+    dl = MediaDownloader(backend_dir / "data" / "projects")
+    p_id = "test_blocked_cap_salvaged"
+    try:
+        with patch.object(dl, "_extract_with_fallback", side_effect=Exception("ERROR: [youtube] Z_gV1hEqlA8: Failed to extract any player response")):
+            media_info = dl.download_url("https://www.youtube.com/watch?v=Z_gV1hEqlA8", p_id)
+            assert media_info["has_video"] is False
+            assert media_info["media_status"] == "captions_only"
+            assert media_info["subtitle_path"] is not None
+            assert Path(media_info["subtitle_path"]).exists()
+            assert media_info["duration"] > 0
+            assert len(media_info["trans_result"]["segments"]) > 0
+            print(f"[PASS] test_video_blocked_captions_success_e2e: Video blocked by player response, successfully salvaged {len(media_info['trans_result']['segments'])} caption segments")
+    finally:
+        p_dir = backend_dir / "data" / "projects" / p_id
+        if p_dir.exists():
+            shutil.rmtree(p_dir)
+
 def test_real_caption_extraction():
     from services.downloader import MediaDownloader
     import shutil
@@ -506,6 +531,34 @@ def test_real_caption_extraction():
         assert Path(res["subtitle_path"]).exists()
         assert Path(res["subtitle_path"]).stat().st_size > 100
         print(f"[PASS] test_real_caption_extraction: Successfully extracted {Path(res['subtitle_path']).stat().st_size} bytes of WebVTT captions")
+    finally:
+        p_dir = backend_dir / "data" / "projects" / p_id
+        if p_dir.exists():
+            shutil.rmtree(p_dir)
+
+def test_production_caption_independent_path():
+    """
+    Production-oriented verification:
+    Validates that acquire_independent_captions acquires subtitles directly from YouTube
+    without calling yt-dlp's player-response endpoint or requiring local browser JS runtime.
+    NOTE: While this demonstrates the Android Innertube endpoint functions without JS/PO tokens,
+    datacenter IP reputation must still be observed in live Render production logs.
+    """
+    from services.downloader import MediaDownloader
+    import shutil
+
+    dl = MediaDownloader(backend_dir / "data" / "projects")
+    p_id = "prod_cap_indep_test"
+    try:
+        res = dl.acquire_independent_captions("https://www.youtube.com/watch?v=Z_gV1hEqlA8", p_id)
+        assert res is not None
+        assert res["media_status"] == "captions_only"
+        assert res["has_video"] is False
+        assert res["duration"] > 250.0
+        assert len(res["trans_result"]["segments"]) >= 50
+        vtt = Path(res["subtitle_path"])
+        assert vtt.exists() and vtt.stat().st_size > 500
+        print(f"[PASS] test_production_caption_independent_path: Verified independent captions on Z_gV1hEqlA8 ({len(res['trans_result']['segments'])} segments, {vtt.stat().st_size} bytes)")
     finally:
         p_dir = backend_dir / "data" / "projects" / p_id
         if p_dir.exists():
@@ -533,5 +586,7 @@ if __name__ == "__main__":
     test_unavailable_video_error()
     test_no_caption_no_video_failure()
     test_failed_player_response_regression()
+    test_video_blocked_captions_success_e2e()
     test_real_caption_extraction()
+    test_production_caption_independent_path()
     print("ALL TESTS PASSED SUCCESSFULLY! [OK]\n")
