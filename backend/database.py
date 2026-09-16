@@ -41,6 +41,7 @@ def init_db():
         error TEXT,
         error_code TEXT,
         created_at TEXT NOT NULL,
+        media_status TEXT DEFAULT 'video_available',
         metadata_json TEXT,
         metrics_json TEXT
     )
@@ -55,6 +56,8 @@ def init_db():
         cursor.execute("ALTER TABLE projects ADD COLUMN metrics_json TEXT")
     if "error_code" not in columns:
         cursor.execute("ALTER TABLE projects ADD COLUMN error_code TEXT")
+    if "media_status" not in columns:
+        cursor.execute("ALTER TABLE projects ADD COLUMN media_status TEXT DEFAULT 'video_available'")
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS transcripts (
@@ -121,15 +124,16 @@ def create_project(
     source_type: str,
     source_url: Optional[str] = None,
     source_url_hash: Optional[str] = None,
-    video_path: Optional[str] = None
+    video_path: Optional[str] = None,
+    media_status: str = "video_available"
 ) -> Dict[str, Any]:
     conn = get_db_connection()
     cursor = conn.cursor()
     now = datetime.utcnow().isoformat()
     cursor.execute("""
-    INSERT INTO projects (id, title, source_type, source_url, source_url_hash, video_path, status, stage, progress_pct, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'queued', 'Queued for processing', 0, ?)
-    """, (project_id, title, source_type, source_url, source_url_hash, video_path, now))
+    INSERT INTO projects (id, title, source_type, source_url, source_url_hash, video_path, media_status, status, stage, progress_pct, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'Queued for processing', 0, ?)
+    """, (project_id, title, source_type, source_url, source_url_hash, video_path, media_status, now))
     conn.commit()
     conn.close()
     return get_project(project_id)
@@ -208,7 +212,14 @@ def update_job_stage(
 def update_project_progress(project_id: str, status: str, stage: str, progress_pct: int, error: Optional[str] = None):
     update_job_stage(project_id, status, stage, progress_pct, error=error)
 
-def update_project_media(project_id: str, title: Optional[str] = None, duration: Optional[float] = None, audio_path: Optional[str] = None, video_path: Optional[str] = None):
+def update_project_media(
+    project_id: str,
+    title: Optional[str] = None,
+    duration: Optional[float] = None,
+    audio_path: Optional[str] = None,
+    video_path: Optional[str] = None,
+    media_status: Optional[str] = None
+):
     conn = get_db_connection()
     cursor = conn.cursor()
     updates = []
@@ -225,6 +236,9 @@ def update_project_media(project_id: str, title: Optional[str] = None, duration:
     if video_path:
         updates.append("video_path = ?")
         params.append(video_path)
+    if media_status:
+        updates.append("media_status = ?")
+        params.append(media_status)
     if updates:
         params.append(project_id)
         cursor.execute(f"UPDATE projects SET {', '.join(updates)} WHERE id = ?", params)
@@ -240,6 +254,34 @@ def _format_project_row(row: sqlite3.Row) -> Dict[str, Any]:
             d["metrics"] = None
     else:
         d["metrics"] = None
+
+    status = d.get("status")
+    stored_media_status = d.get("media_status")
+    has_video_path = bool(d.get("video_path"))
+
+    if status == "failed":
+        effective_media_status = "failed"
+        video_avail = False
+        trans_avail = False
+        vis_avail = False
+    elif stored_media_status == "captions_only" or (status == "completed" and not has_video_path):
+        effective_media_status = "captions_only"
+        video_avail = False
+        trans_avail = True
+        vis_avail = False
+    else:
+        effective_media_status = "video_available"
+        video_avail = True
+        trans_avail = True
+        vis_avail = True
+
+    d["media_status"] = effective_media_status
+    d["capabilities"] = {
+        "media_status": effective_media_status,
+        "video_available": video_avail,
+        "transcript_available": trans_avail,
+        "visual_analysis_available": vis_avail
+    }
     return d
 
 def get_project(project_id: str) -> Optional[Dict[str, Any]]:

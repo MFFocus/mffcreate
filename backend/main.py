@@ -125,7 +125,8 @@ def parse_vtt_subtitles(vtt_path: str) -> Optional[Dict[str, Any]]:
         with open(vtt_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
 
-        ts_regex = re.compile(r'(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})')
+        # Matches either HH:MM:SS.mmm or MM:SS.mmm with either . or , separator
+        ts_regex = re.compile(r'(?:(\d{2}):)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(?:(\d{2}):)?(\d{2}):(\d{2})[.,](\d{3})')
         cur_start = None
         cur_end = None
         cur_text = []
@@ -142,8 +143,11 @@ def parse_vtt_subtitles(vtt_path: str) -> Optional[Dict[str, Any]]:
                         full_text_parts.append(txt)
                         seg_id += 1
                     cur_text = []
-                h1, m1, s1, ms1 = map(int, match.groups()[:4])
-                h2, m2, s2, ms2 = map(int, match.groups()[4:])
+                g = match.groups()
+                h1 = int(g[0]) if g[0] is not None else 0
+                m1, s1, ms1 = int(g[1]), int(g[2]), int(g[3])
+                h2 = int(g[4]) if g[4] is not None else 0
+                m2, s2, ms2 = int(g[5]), int(g[6]), int(g[7])
                 cur_start = round(h1 * 3600 + m1 * 60 + s1 + ms1 / 1000.0, 2)
                 cur_end = round(h2 * 3600 + m2 * 60 + s2 + ms2 / 1000.0, 2)
             elif cur_start is not None and line_str and not line_str.startswith("WEBVTT") and not line_str.isdigit():
@@ -208,13 +212,15 @@ def run_processing_pipeline(project_id: str, source_type: str, source_val: str, 
             duration = media_info["duration"]
             subtitle_path = media_info.get("subtitle_path")
             has_video = media_info.get("has_video", True)
+            media_status = media_info.get("media_status", "video_available" if has_video else "captions_only")
             metrics["download_sec"] = media_info.get("download_sec", 0.0)
         else: # local file
             video_path = source_val
             duration = processor.get_duration(video_path)
             title = Path(video_path).stem.replace("_", " ").title()
+            media_status = "video_available"
 
-        update_project_media(project_id, title=title, duration=duration, video_path=video_path)
+        update_project_media(project_id, title=title, duration=duration, video_path=video_path, media_status=media_status)
 
         audio_wav = None
         if has_video and video_path:
@@ -424,6 +430,8 @@ def get_job_status(job_id: str):
         "error_code": proj.get("error_code"),
         "duration": proj.get("duration", 0),
         "metrics": proj.get("metrics"),
+        "media_status": proj.get("media_status"),
+        "capabilities": proj.get("capabilities"),
         "created_at": proj["created_at"]
     }
 

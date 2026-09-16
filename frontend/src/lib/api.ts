@@ -93,6 +93,13 @@ export type JobStatus =
   | 'failed'
   | 'processing';
 
+export interface Capabilities {
+  media_status: 'video_available' | 'captions_only' | 'failed';
+  video_available: boolean;
+  transcript_available: boolean;
+  visual_analysis_available: boolean;
+}
+
 export interface Project {
   id: string;
   title: string;
@@ -109,6 +116,8 @@ export interface Project {
   current_timestamp?: number;
   error?: string;
   error_code?: string;
+  media_status?: 'video_available' | 'captions_only' | 'failed';
+  capabilities?: Capabilities;
   metrics?: ProjectMetrics;
   created_at: string;
 }
@@ -352,6 +361,8 @@ export const api = {
           current_timestamp: data.current_timestamp,
           error: data.error,
           error_code: data.error_code,
+          media_status: data.media_status,
+          capabilities: data.capabilities,
           metrics: data.metrics,
           created_at: data.created_at || new Date().toISOString()
         };

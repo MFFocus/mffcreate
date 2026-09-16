@@ -230,6 +230,139 @@ class MediaDownloader:
                 logger.warning(f"Fallback extraction also encountered issue: {e2}")
                 raise e2
 
+    def extract_captions(self, url: str, project_id: str) -> Dict[str, Any]:
+        """
+        Legitimately extracts publicly available manual subtitles or auto-captions
+        without downloading the heavy binary video stream.
+        Used as a resilient fallback when YouTube blocks video stream access on datacenter IPs.
+        """
+        start_time = time.time()
+        proj_dir = self.storage_dir / project_id
+        proj_dir.mkdir(parents=True, exist_ok=True)
+
+        info_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+            'nocheckcertificate': True,
+            'socket_timeout': 25,
+            'retries': 2,
+        }
+
+        info = self._extract_with_fallback(info_opts, url, download=False)
+        title = info.get('title', 'Educational Lecture')
+        duration = float(info.get('duration', 0.0) or 0.0)
+        uploader = info.get('uploader', 'Instructor')
+        description = info.get('description', '')
+
+        if duration > MAX_VIDEO_DURATION_SEC:
+            max_hrs = MAX_VIDEO_DURATION_SEC / 3600
+            curr_hrs = round(duration / 3600, 1)
+            raise VideoDurationLimitError(curr_hrs, max_hrs)
+
+        manual_subs = info.get('subtitles') or {}
+        auto_subs = info.get('automatic_captions') or {}
+
+        if not manual_subs and not auto_subs:
+            raise MediaAcquisitionError(
+                "No public subtitles or captions available for this video.",
+                error_code="YOUTUBE_BOT_CHECK"
+            )
+
+        # Candidate language selection strategy:
+        # 1. English manual subtitles ('en', 'en-US', etc.)
+        # 2. Any manual subtitles
+        # 3. Original auto-caption ('-orig' suffix)
+        # 4. English auto-caption ('en')
+        # 5. Any auto-caption
+        chosen_track = None
+        chosen_lang = None
+
+        for lang_code, formats in manual_subs.items():
+            if lang_code.lower().startswith('en'):
+                chosen_track = formats
+                chosen_lang = lang_code
+                break
+        if not chosen_track and manual_subs:
+            chosen_lang = next(iter(manual_subs))
+            chosen_track = manual_subs[chosen_lang]
+
+        if not chosen_track:
+            orig_key = next((k for k in auto_subs if 'orig' in k.lower()), None)
+            if orig_key:
+                chosen_track = auto_subs[orig_key]
+                chosen_lang = orig_key
+            elif 'en' in auto_subs:
+                chosen_track = auto_subs['en']
+                chosen_lang = 'en'
+            elif auto_subs:
+                chosen_lang = next(iter(auto_subs))
+                chosen_track = auto_subs[chosen_lang]
+
+        if not chosen_track:
+            raise MediaAcquisitionError(
+                "Could not identify a viable caption track.",
+                error_code="YOUTUBE_BOT_CHECK"
+            )
+
+        # Prioritize WebVTT format for seamless parsing
+        format_order = ['vtt', 'srt', 'srv3', 'ttml', 'json3']
+        selected_fmt = None
+        for fmt in format_order:
+            cand = next((f for f in chosen_track if f.get('ext') == fmt), None)
+            if cand and cand.get('url'):
+                selected_fmt = cand
+                break
+
+        if not selected_fmt:
+            selected_fmt = chosen_track[0] if chosen_track and chosen_track[0].get('url') else None
+
+        if not selected_fmt or not selected_fmt.get('url'):
+            raise MediaAcquisitionError(
+                "No valid download URL found for captions.",
+                error_code="YOUTUBE_BOT_CHECK"
+            )
+
+        sub_url = selected_fmt['url']
+        sub_ext = selected_fmt.get('ext', 'vtt')
+        dest_file = proj_dir / f"caption.{sub_ext}"
+
+        import urllib.request
+        req = urllib.request.Request(
+            sub_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            data = resp.read()
+
+        if len(data) == 0:
+            raise MediaAcquisitionError(
+                "Downloaded caption content was empty.",
+                error_code="YOUTUBE_BOT_CHECK"
+            )
+
+        with open(dest_file, "wb") as f:
+            f.write(data)
+
+        download_sec = round(time.time() - start_time, 2)
+        logger.info(f"Legitimate caption fallback downloaded ({len(data)} bytes, lang: {chosen_lang}) in {download_sec}s")
+
+        return {
+            "title": title,
+            "duration": duration,
+            "uploader": uploader,
+            "description": description[:500] if description else "",
+            "video_path": None,
+            "subtitle_path": str(dest_file),
+            "has_video": False,
+            "media_status": "captions_only",
+            "notice": "Video stream could not be acquired; complete study workspace generated from verified lecture captions.",
+            "download_sec": download_sec
+        }
+
     def download_url(self, url: str, project_id: str, progress_callback=None) -> Dict[str, Any]:
         """
         Downloads video and audio for educational processing using yt-dlp.
@@ -290,7 +423,7 @@ class MediaDownloader:
             'fragment_retries': 2,
             'writesubtitles': True,
             'writeautomaticsub': True,
-            'subtitleslangs': ['en'],
+            'subtitleslangs': ['en', 'en.*', 'all', '-live_chat'],
         }
 
         try:
@@ -337,6 +470,7 @@ class MediaDownloader:
                 "video_path": downloaded_file,
                 "subtitle_path": subtitle_file,
                 "has_video": True,
+                "media_status": "video_available",
                 "download_sec": download_sec
             }
 
@@ -344,44 +478,27 @@ class MediaDownloader:
             raise
         except Exception as e:
             err_str = str(e)
-            logger.warning(f"Full video download encountered issue: {err_str}. Attempting legitimate caption fallback...")
+            classified = classify_yt_error(err_str)
+
+            # If the failure is unrecoverable (private, non-existent, age restricted, geo-restricted, duration exceeded), abort immediately
+            if classified.error_code in ("VIDEO_PRIVATE", "VIDEO_UNAVAILABLE", "VIDEO_AGE_RESTRICTED", "VIDEO_REGION_RESTRICTED", "DURATION_EXCEEDED"):
+                logger.error(f"Unrecoverable YouTube error [{classified.error_code}]: {classified}")
+                raise classified
+
+            logger.warning(f"Full video download encountered issue ({err_str}). Attempting legitimate caption fallback...")
 
             # SAFE CAPTION-ONLY FALLBACK:
-            # If the video stream itself cannot be obtained, check if public or auto captions
-            # can be legitimately retrieved without downloading the heavy video binary.
-            caption_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'skip_download': True,
-                'nocheckcertificate': True,
-                'writesubtitles': True,
-                'writeautomaticsub': True,
-                'subtitleslangs': ['en'],
-                'outtmpl': str(proj_dir / "caption.%(ext)s"),
-                'socket_timeout': 20,
-                'retries': 2,
-            }
             try:
-                cap_info = self._extract_with_fallback(caption_opts, url, download=True)
-                vtt_files = list(proj_dir.glob("*.vtt"))
-                if vtt_files:
-                    logger.info(f"Safe caption fallback successful: {vtt_files[0]}")
-                    return {
-                        "title": cap_info.get('title', 'Educational Lecture'),
-                        "duration": float(cap_info.get('duration', 0.0) or 0.0),
-                        "uploader": cap_info.get('uploader', 'Instructor'),
-                        "description": cap_info.get('description', '')[:500] if cap_info.get('description') else "",
-                        "video_path": None,
-                        "subtitle_path": str(vtt_files[0]),
-                        "has_video": False,
-                        "notice": "Video visuals could not be downloaded; study workspace synthesized from verified lecture speech.",
-                        "download_sec": round(time.time() - start_time, 2)
-                    }
+                cap_res = self.extract_captions(url, project_id)
+                if cap_res and cap_res.get("subtitle_path"):
+                    logger.info(f"Safe caption fallback successful: {cap_res.get('subtitle_path')}")
+                    return cap_res
+            except VideoDurationLimitError:
+                raise
             except Exception as cap_err:
                 logger.warning(f"Caption fallback was not available: {cap_err}")
 
-            # If both video download and caption fallback failed, classify error cleanly
-            classified = classify_yt_error(err_str)
+            # If both video download and caption fallback failed, raise classified error
             logger.error(f"Classified YouTube acquisition error [{classified.error_code}]: {classified}")
             raise classified
 

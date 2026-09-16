@@ -336,8 +336,183 @@ def test_downloader_fallback_extraction():
     assert 'direction' in info.get('title', '').lower()
     print("[PASS] test_downloader_fallback_extraction (retrieved video metadata reliably)")
 
+def test_full_video_capabilities():
+    from database import create_project, get_project, update_job_stage, update_project_media, delete_project
+    p_id = "cap_full_vid"
+    create_project(p_id, "Full Video Lecture", "url", video_path="/fake/path/video.mp4", media_status="video_available")
+    update_job_stage(p_id, "completed", "Study workspace ready!", 100)
+    
+    proj = get_project(p_id)
+    assert proj["media_status"] == "video_available"
+    assert proj["capabilities"]["media_status"] == "video_available"
+    assert proj["capabilities"]["video_available"] is True
+    assert proj["capabilities"]["transcript_available"] is True
+    assert proj["capabilities"]["visual_analysis_available"] is True
+    
+    delete_project(p_id)
+    print("[PASS] test_full_video_capabilities")
+
+def test_captions_only_fallback_and_capabilities():
+    from database import (
+        create_project, get_project, update_job_stage,
+        save_transcript, save_keyframes, save_study_materials, delete_project
+    )
+    from services.ai_service import AIService
+    p_id = "cap_only_test"
+    create_project(p_id, "Captions Only Lecture", "url", media_status="captions_only")
+    
+    # 1. Verify capabilities before and after completion
+    proj = get_project(p_id)
+    assert proj["media_status"] == "captions_only"
+    assert proj["capabilities"]["video_available"] is False
+    assert proj["capabilities"]["visual_analysis_available"] is False
+
+    # 2. Emulate captions-only pipeline: transcript exists, keyframes are explicitly empty
+    sample_segments = [
+        {"id": 0, "start": 0.0, "end": 10.0, "text": "Welcome to quantum computing fundamentals."},
+        {"id": 1, "start": 11.0, "end": 25.0, "text": "A qubit can exist in superposition state alpha |0> + beta |1>."},
+        {"id": 2, "start": 26.0, "end": 45.0, "text": "What is quantum entanglement? When particles cannot be described independently."}
+    ]
+    transcript_data = {
+        "duration": 45.0,
+        "full_text": " ".join(s["text"] for s in sample_segments),
+        "segments": sample_segments
+    }
+    save_transcript(p_id, transcript_data["full_text"], sample_segments)
+    save_keyframes(p_id, []) # Honest: empty keyframes in captions_only mode
+
+    # 3. AI synthesis from transcript without fabricating visuals
+    ai = AIService()
+    study = ai._synthesize_with_local_nlp("Quantum Computing", transcript_data, [])
+    save_study_materials(p_id, study)
+    update_job_stage(p_id, "completed", "Study workspace ready!", 100)
+
+    proj_completed = get_project(p_id)
+    assert proj_completed["status"] == "completed"
+    assert proj_completed["media_status"] == "captions_only"
+    assert proj_completed["capabilities"] == {
+        "media_status": "captions_only",
+        "video_available": False,
+        "transcript_available": True,
+        "visual_analysis_available": False
+    }
+    assert len(study["chapters"]) >= 1
+    assert len(study["questions"]) >= 1
+
+    delete_project(p_id)
+    print("[PASS] test_captions_only_fallback_and_capabilities")
+
+def test_youtube_bot_check_restriction():
+    from services.downloader import classify_yt_error, YouTubeBotCheckError
+    from database import create_project, get_project, update_job_stage, delete_project
+
+    err = classify_yt_error("ERROR: [youtube] 12345: Sign in to confirm you’re not a bot. Use --cookies-from-browser")
+    assert isinstance(err, YouTubeBotCheckError)
+    assert err.error_code == "YOUTUBE_BOT_CHECK"
+    assert "temporarily limiting automated access" in err.user_message
+
+    p_id = "bot_check_test"
+    create_project(p_id, "Blocked Lecture", "url")
+    update_job_stage(p_id, "failed", err.user_message, 0, error=str(err), error_code=err.error_code)
+
+    proj = get_project(p_id)
+    assert proj["status"] == "failed"
+    assert proj["error_code"] == "YOUTUBE_BOT_CHECK"
+    assert proj["capabilities"] == {
+        "media_status": "failed",
+        "video_available": False,
+        "transcript_available": False,
+        "visual_analysis_available": False
+    }
+
+    delete_project(p_id)
+    print("[PASS] test_youtube_bot_check_restriction")
+
+def test_private_video_error():
+    from services.downloader import MediaDownloader, VideoPrivateError
+    from unittest.mock import patch
+
+    dl = MediaDownloader(backend_dir / "data" / "projects")
+    with patch.object(dl, "_extract_with_fallback", side_effect=Exception("ERROR: [youtube] abc: This video is private.")):
+        try:
+            dl.download_url("https://www.youtube.com/watch?v=private123", "proj_priv")
+            assert False, "Should have raised VideoPrivateError"
+        except VideoPrivateError as e:
+            assert e.error_code == "VIDEO_PRIVATE"
+            assert "private" in e.user_message.lower()
+    print("[PASS] test_private_video_error")
+
+def test_unavailable_video_error():
+    from services.downloader import MediaDownloader, VideoUnavailableError
+    from unittest.mock import patch
+
+    dl = MediaDownloader(backend_dir / "data" / "projects")
+    with patch.object(dl, "_extract_with_fallback", side_effect=Exception("ERROR: [youtube] abc: Video unavailable. This video has been removed.")):
+        try:
+            dl.download_url("https://www.youtube.com/watch?v=unavail123", "proj_unavail")
+            assert False, "Should have raised VideoUnavailableError"
+        except VideoUnavailableError as e:
+            assert e.error_code == "VIDEO_UNAVAILABLE"
+            assert "unavailable" in e.user_message.lower()
+    print("[PASS] test_unavailable_video_error")
+
+def test_no_caption_no_video_failure():
+    from services.downloader import MediaDownloader, YouTubeBotCheckError
+    from unittest.mock import patch
+
+    dl = MediaDownloader(backend_dir / "data" / "projects")
+    # Simulate both video download bot error AND metadata having no captions
+    with patch.object(dl, "_extract_with_fallback") as mock_extract:
+        # Call 1 (pre-check): basic metadata
+        # Call 2 (full download): bot check failure
+        # Call 3 (caption fallback): metadata without subtitles
+        mock_extract.side_effect = [
+            {"title": "No Captions Video", "duration": 120},
+            Exception("ERROR: [youtube] test: Sign in to confirm you’re not a bot."),
+            {"title": "No Captions Video", "duration": 120, "subtitles": {}, "automatic_captions": {}}
+        ]
+        try:
+            dl.download_url("https://www.youtube.com/watch?v=nocaptions", "proj_nocap")
+            assert False, "Should have raised YouTubeBotCheckError"
+        except YouTubeBotCheckError as e:
+            assert e.error_code == "YOUTUBE_BOT_CHECK"
+            assert "temporarily limiting automated access" in e.user_message
+    print("[PASS] test_no_caption_no_video_failure")
+
+def test_failed_player_response_regression():
+    from services.downloader import classify_yt_error, YouTubeBotCheckError
+
+    err1 = classify_yt_error("ERROR: [youtube] I8XaYkRW1tA: Failed to extract any player response")
+    assert isinstance(err1, YouTubeBotCheckError)
+    assert err1.error_code == "YOUTUBE_BOT_CHECK"
+
+    err2 = classify_yt_error("ERROR: [youtube] All player responses are invalid. Your IP is likely being blocked by Youtube")
+    assert isinstance(err2, YouTubeBotCheckError)
+    assert err2.error_code == "YOUTUBE_BOT_CHECK"
+
+    print("[PASS] test_failed_player_response_regression")
+
+def test_real_caption_extraction():
+    from services.downloader import MediaDownloader
+    import shutil
+
+    dl = MediaDownloader(backend_dir / "data" / "projects")
+    p_id = "real_cap_test"
+    try:
+        res = dl.extract_captions("https://www.youtube.com/watch?v=I8XaYkRW1tA", p_id)
+        assert res["has_video"] is False
+        assert res["media_status"] == "captions_only"
+        assert res["subtitle_path"] is not None
+        assert Path(res["subtitle_path"]).exists()
+        assert Path(res["subtitle_path"]).stat().st_size > 100
+        print(f"[PASS] test_real_caption_extraction: Successfully extracted {Path(res['subtitle_path']).stat().st_size} bytes of WebVTT captions")
+    finally:
+        p_dir = backend_dir / "data" / "projects" / p_id
+        if p_dir.exists():
+            shutil.rmtree(p_dir)
+
 if __name__ == "__main__":
-    print("\n--- RUNNING MFFCONVERT BACKEND INTEGRATION TESTS ---")
+    print("\n--- RUNNING MFFCONVERT BACKEND INTEGRATION & REGRESSION TESTS ---")
     test_database_lifecycle()
     test_ffmpeg_detection()
     test_ocr_classification()
@@ -350,4 +525,13 @@ if __name__ == "__main__":
     test_error_classification_and_codes()
     test_database_error_code_persistence()
     test_downloader_fallback_extraction()
+    # 7 Critical Scenarios
+    test_full_video_capabilities()
+    test_captions_only_fallback_and_capabilities()
+    test_youtube_bot_check_restriction()
+    test_private_video_error()
+    test_unavailable_video_error()
+    test_no_caption_no_video_failure()
+    test_failed_player_response_regression()
+    test_real_caption_extraction()
     print("ALL TESTS PASSED SUCCESSFULLY! [OK]\n")
