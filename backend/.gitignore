@@ -1,0 +1,51 @@
+# Python Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python Bytecode & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+!.env*.example
+*.pem
+*.key
+
+# Local Databases
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.sqlite
+data/mffconvert.db
+
+# Media, Frames & Temp Artifacts
+data/projects/
+frames/
+uploads/
+videos/
+audio/
+cache/
+.cache/
+models/
+logs/
+tmp/
+temp/
+*.mp4
+*.wav
+*.mkv
+*.webm
+*.mp3
+*.onnx
+*.bin
+*.pt
