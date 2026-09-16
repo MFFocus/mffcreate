@@ -260,6 +260,16 @@ def test_error_classification_and_codes():
     assert err1.error_code == "YOUTUBE_BOT_CHECK"
     assert "temporarily limiting automated access" in err1.user_message
 
+    # 1b. Regression: Failed to extract any player response (Render failure)
+    err1b = classify_yt_error("ERROR: [youtube] I8XaYkRW1tA: Failed to extract any player response")
+    assert isinstance(err1b, YouTubeBotCheckError)
+    assert err1b.error_code == "YOUTUBE_BOT_CHECK"
+
+    # 1c. Regression: IP blocked / all player responses invalid
+    err1c = classify_yt_error("All player responses are invalid. Your IP is likely being blocked by Youtube")
+    assert isinstance(err1c, YouTubeBotCheckError)
+    assert err1c.error_code == "YOUTUBE_BOT_CHECK"
+
     # 2. Private video
     err2 = classify_yt_error("ERROR: [youtube] 12345: This video is private.")
     assert isinstance(err2, VideoPrivateError)
@@ -310,6 +320,22 @@ def test_database_error_code_persistence():
     delete_project(p_id)
     print("[PASS] test_database_error_code_persistence")
 
+def test_downloader_fallback_extraction():
+    from services.downloader import MediaDownloader
+    dl = MediaDownloader(backend_dir / "data" / "projects")
+    info = dl._extract_with_fallback({
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'nocheckcertificate': True,
+        'socket_timeout': 20,
+        'retries': 2,
+    }, 'https://www.youtube.com/watch?v=I8XaYkRW1tA', download=False)
+    assert info is not None
+    assert info.get('duration') == 353
+    assert 'direction' in info.get('title', '').lower()
+    print("[PASS] test_downloader_fallback_extraction (retrieved video metadata reliably)")
+
 if __name__ == "__main__":
     print("\n--- RUNNING MFFCONVERT BACKEND INTEGRATION TESTS ---")
     test_database_lifecycle()
@@ -323,4 +349,5 @@ if __name__ == "__main__":
     test_media_cleanup()
     test_error_classification_and_codes()
     test_database_error_code_persistence()
+    test_downloader_fallback_extraction()
     print("ALL TESTS PASSED SUCCESSFULLY! [OK]\n")

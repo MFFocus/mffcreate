@@ -26,16 +26,6 @@ MAX_VIDEO_DURATION_SEC = 9000
 
 PIPELINE_VERSION = "v2"
 
-# Conservative multi-client extractor arguments for YouTube.
-# Uses legitimate Android and iOS mobile Innertube endpoints which avoid
-# the web-only bot challenges frequently encountered on cloud datacenter IPs.
-BASE_YTDL_EXTRACTOR_ARGS = {
-    'youtube': {
-        'player_client': ['android', 'ios', 'web'],
-        'player_skip': ['webpage', 'configs'],
-    }
-}
-
 
 # =====================================================================
 # Domain Exceptions & Error Classification
@@ -110,15 +100,20 @@ def classify_yt_error(err_str: str) -> MediaAcquisitionError:
         or "confirm you're not a bot" in lower
         or "bot verification" in lower
         or "use --cookies" in lower
+        or "failed to extract any player response" in lower
+        or "all player responses are invalid" in lower
+        or "ip is likely being blocked" in lower
+        or "unable to download api page" in lower
+        or "unable to download initial data" in lower
     ):
         return YouTubeBotCheckError(err_str)
     elif "private video" in lower or "this video is private" in lower:
         return VideoPrivateError(err_str)
-    elif "video unavailable" in lower or "does not exist" in lower or "has been removed" in lower:
+    elif "video unavailable" in lower or "does not exist" in lower or "has been removed" in lower or "this video is unavailable" in lower:
         return VideoUnavailableError(err_str)
     elif "sign in to confirm your age" in lower or "age-restricted" in lower or "inappropriate for some users" in lower:
         return VideoAgeRestrictedError(err_str)
-    elif "not available in your country" in lower or "blocked in your country" in lower or "geo restricted" in lower:
+    elif "not available in your country" in lower or "blocked in your country" in lower or "geo restricted" in lower or "region" in lower:
         return VideoRegionRestrictedError(err_str)
     else:
         return MediaAcquisitionError(err_str, error_code="DOWNLOAD_FAILED")
@@ -194,11 +189,52 @@ class MediaDownloader:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.ffmpeg_exe = get_ffmpeg_executable()
 
+    def _extract_with_fallback(self, base_opts: Dict[str, Any], url: str, download: bool = False) -> Dict[str, Any]:
+        """
+        Executes yt-dlp using a conservative, bounded fallback strategy:
+        1. Primary: Default supported yt-dlp extraction configuration.
+           Preserves standard webpage, configs, visitor data, and official default clients (visionos, web).
+        2. Secondary: If primary extraction encounters a player response or access challenge,
+           attempts a bounded multi-client fallback ('tv_downgraded', 'android', 'web')
+           WITHOUT skipping webpage or configs.
+        Never loops infinitely; retries and network timeouts are strictly bounded.
+        """
+        opts1 = dict(base_opts)
+        try:
+            with yt_dlp.YoutubeDL(opts1) as ydl:
+                return ydl.extract_info(url, download=download)
+        except Exception as e1:
+            err_str1 = str(e1)
+            # Unrecoverable errors: do not retry fallback
+            if (
+                "exceeds limit" in err_str1
+                or "private video" in err_str1.lower()
+                or "video unavailable" in err_str1.lower()
+                or "does not exist" in err_str1.lower()
+                or "has been removed" in err_str1.lower()
+            ):
+                raise
+
+            logger.info(f"Primary yt-dlp extraction notice ({err_str1}). Trying bounded multi-client fallback...")
+
+            opts2 = dict(base_opts)
+            opts2['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['tv_downgraded', 'android', 'web'],
+                }
+            }
+            try:
+                with yt_dlp.YoutubeDL(opts2) as ydl:
+                    return ydl.extract_info(url, download=download)
+            except Exception as e2:
+                logger.warning(f"Fallback extraction also encountered issue: {e2}")
+                raise e2
+
     def download_url(self, url: str, project_id: str, progress_callback=None) -> Dict[str, Any]:
         """
         Downloads video and audio for educational processing using yt-dlp.
         Downloads at standard/medium resolution (<=480p) to optimize CPU/RAM/bandwidth.
-        Uses mobile player clients to avoid datacenter IP bot challenges without cookies.
+        Uses a conservative fallback strategy without requiring personal cookies or credentials.
         Provides safe caption-only fallback if video streaming is restricted by YouTube.
         """
         start_time = time.time()
@@ -215,30 +251,29 @@ class MediaDownloader:
                     pct = int(downloaded / total * 100)
                     progress_callback(pct)
 
-        # Pre-check duration without full download
+        # Pre-check duration without full download using the same reliable extraction configuration
         info_opts = {
             'quiet': True,
             'no_warnings': True,
             'skip_download': True,
             'nocheckcertificate': True,
             'socket_timeout': 20,
-            'extractor_args': BASE_YTDL_EXTRACTOR_ARGS,
+            'retries': 2,
         }
         try:
-            with yt_dlp.YoutubeDL(info_opts) as ydl:
-                pre_info = ydl.extract_info(url, download=False)
-                if pre_info:
-                    vid_duration = float(pre_info.get('duration', 0.0) or 0.0)
-                    if vid_duration > MAX_VIDEO_DURATION_SEC:
-                        max_hrs = MAX_VIDEO_DURATION_SEC / 3600
-                        curr_hrs = round(vid_duration / 3600, 1)
-                        raise VideoDurationLimitError(curr_hrs, max_hrs)
+            pre_info = self._extract_with_fallback(info_opts, url, download=False)
+            if pre_info:
+                vid_duration = float(pre_info.get('duration', 0.0) or 0.0)
+                if vid_duration > MAX_VIDEO_DURATION_SEC:
+                    max_hrs = MAX_VIDEO_DURATION_SEC / 3600
+                    curr_hrs = round(vid_duration / 3600, 1)
+                    raise VideoDurationLimitError(curr_hrs, max_hrs)
         except VideoDurationLimitError:
             raise
         except Exception as e:
-            logger.warning(f"Duration pre-check notice: {e}")
+            logger.warning(f"Duration pre-check notice (will verify during acquisition): {e}")
 
-        # Main download configuration with multi-client fallback
+        # Main download configuration with conservative format selection
         ydl_opts = {
             # Prefer 480p or 360p progressive stream (format 18) for maximum stability
             'format': 'best[height<=480]/18/bestvideo[height<=480]+bestaudio/best',
@@ -250,57 +285,60 @@ class MediaDownloader:
             'nocheckcertificate': True,
             'progress_hooks': [hook] if progress_callback else [],
             'noplaylist': True,
-            'socket_timeout': 25,
-            'retries': 3,
-            'fragment_retries': 3,
+            'socket_timeout': 20,
+            'retries': 2,
+            'fragment_retries': 2,
             'writesubtitles': True,
             'writeautomaticsub': True,
             'subtitleslangs': ['en'],
-            'extractor_args': BASE_YTDL_EXTRACTOR_ARGS,
         }
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = info.get('title', 'Educational Lecture')
-                duration = float(info.get('duration', 0.0) or 0.0)
-                uploader = info.get('uploader', 'Instructor')
-                description = info.get('description', '')
+            info = self._extract_with_fallback(ydl_opts, url, download=True)
+            title = info.get('title', 'Educational Lecture')
+            duration = float(info.get('duration', 0.0) or 0.0)
+            uploader = info.get('uploader', 'Instructor')
+            description = info.get('description', '')
 
-                # Find the downloaded video file
-                downloaded_file = None
-                for ext in ['mp4', 'mkv', 'webm']:
-                    candidate = proj_dir / f"video.{ext}"
-                    if candidate.exists():
-                        downloaded_file = str(candidate)
-                        break
+            if duration > MAX_VIDEO_DURATION_SEC:
+                max_hrs = MAX_VIDEO_DURATION_SEC / 3600
+                curr_hrs = round(duration / 3600, 1)
+                raise VideoDurationLimitError(curr_hrs, max_hrs)
 
-                if not downloaded_file:
-                    files = list(proj_dir.glob("video.*"))
-                    if files:
-                        downloaded_file = str(files[0])
+            # Find the downloaded video file
+            downloaded_file = None
+            for ext in ['mp4', 'mkv', 'webm']:
+                candidate = proj_dir / f"video.{ext}"
+                if candidate.exists():
+                    downloaded_file = str(candidate)
+                    break
 
-                if not downloaded_file:
-                    raise FileNotFoundError("Downloaded media file not found on disk.")
+            if not downloaded_file:
+                files = list(proj_dir.glob("video.*"))
+                if files:
+                    downloaded_file = str(files[0])
 
-                # Check for downloaded subtitles
-                subtitle_file = None
-                vtt_files = list(proj_dir.glob("*.vtt"))
-                if vtt_files:
-                    subtitle_file = str(vtt_files[0])
+            if not downloaded_file:
+                raise FileNotFoundError("Downloaded media file not found on disk.")
 
-                download_sec = round(time.time() - start_time, 2)
+            # Check for downloaded subtitles
+            subtitle_file = None
+            vtt_files = list(proj_dir.glob("*.vtt"))
+            if vtt_files:
+                subtitle_file = str(vtt_files[0])
 
-                return {
-                    "title": title,
-                    "duration": duration,
-                    "uploader": uploader,
-                    "description": description[:500] if description else "",
-                    "video_path": downloaded_file,
-                    "subtitle_path": subtitle_file,
-                    "has_video": True,
-                    "download_sec": download_sec
-                }
+            download_sec = round(time.time() - start_time, 2)
+
+            return {
+                "title": title,
+                "duration": duration,
+                "uploader": uploader,
+                "description": description[:500] if description else "",
+                "video_path": downloaded_file,
+                "subtitle_path": subtitle_file,
+                "has_video": True,
+                "download_sec": download_sec
+            }
 
         except VideoDurationLimitError:
             raise
@@ -320,26 +358,25 @@ class MediaDownloader:
                 'writeautomaticsub': True,
                 'subtitleslangs': ['en'],
                 'outtmpl': str(proj_dir / "caption.%(ext)s"),
-                'extractor_args': BASE_YTDL_EXTRACTOR_ARGS,
                 'socket_timeout': 20,
+                'retries': 2,
             }
             try:
-                with yt_dlp.YoutubeDL(caption_opts) as ydl_cap:
-                    cap_info = ydl_cap.extract_info(url, download=True)
-                    vtt_files = list(proj_dir.glob("*.vtt"))
-                    if vtt_files:
-                        logger.info(f"Safe caption fallback successful: {vtt_files[0]}")
-                        return {
-                            "title": cap_info.get('title', 'Educational Lecture'),
-                            "duration": float(cap_info.get('duration', 0.0) or 0.0),
-                            "uploader": cap_info.get('uploader', 'Instructor'),
-                            "description": cap_info.get('description', '')[:500] if cap_info.get('description') else "",
-                            "video_path": None,
-                            "subtitle_path": str(vtt_files[0]),
-                            "has_video": False,
-                            "notice": "Video visuals could not be downloaded; study workspace synthesized from verified lecture speech.",
-                            "download_sec": round(time.time() - start_time, 2)
-                        }
+                cap_info = self._extract_with_fallback(caption_opts, url, download=True)
+                vtt_files = list(proj_dir.glob("*.vtt"))
+                if vtt_files:
+                    logger.info(f"Safe caption fallback successful: {vtt_files[0]}")
+                    return {
+                        "title": cap_info.get('title', 'Educational Lecture'),
+                        "duration": float(cap_info.get('duration', 0.0) or 0.0),
+                        "uploader": cap_info.get('uploader', 'Instructor'),
+                        "description": cap_info.get('description', '')[:500] if cap_info.get('description') else "",
+                        "video_path": None,
+                        "subtitle_path": str(vtt_files[0]),
+                        "has_video": False,
+                        "notice": "Video visuals could not be downloaded; study workspace synthesized from verified lecture speech.",
+                        "download_sec": round(time.time() - start_time, 2)
+                    }
             except Exception as cap_err:
                 logger.warning(f"Caption fallback was not available: {cap_err}")
 
