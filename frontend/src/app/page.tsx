@@ -542,7 +542,7 @@ export default function HomePage() {
               <h2 className="text-lg font-bold text-slate-900 dark:text-white">Your Study Library</h2>
             </div>
             <span className="text-xs text-slate-500 dark:text-slate-400">
-              Saved on your local device
+              Active workspaces
             </span>
           </div>
 

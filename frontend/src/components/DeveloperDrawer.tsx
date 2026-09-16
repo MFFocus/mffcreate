@@ -60,11 +60,10 @@ export const DeveloperDrawer: React.FC<DeveloperDrawerProps> = ({ isOpen, onClos
   };
 
   const handleReset = () => {
-    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-    const def = process.env.NEXT_PUBLIC_BACKEND_URL || (isLocalhost ? 'http://127.0.0.1:8000' : '');
-    setCustomBackendUrl(def);
-    setBackendUrl(def);
-    checkHealth(def);
+    setBackendUrl('');
+    const active = getBackendUrl();
+    setCustomBackendUrl(active);
+    checkHealth(active);
   };
 
   if (!isOpen) return null;

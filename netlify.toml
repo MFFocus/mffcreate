@@ -1,5 +1,5 @@
-# Netlify configuration for MffConvert Next.js Full Public Web Service
-# Processing runs serverlessly via Next.js App Router API handlers with zero local setup.
+# Netlify configuration for MffConvert Next.js Frontend
+# Connected to Render FastAPI backend (https://mffconvert-backend.onrender.com)
 
 [build]
   base = "frontend"

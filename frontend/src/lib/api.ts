@@ -13,6 +13,7 @@ import {
   SAMPLE_TRANSCRIPT,
 } from './sampleData';
 
+const DEFAULT_PRODUCTION_BACKEND_URL = 'https://mffconvert-backend.onrender.com';
 const ENV_BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || '').trim().replace(/\/+$/, '');
 
 export function getBackendUrl(): string {
@@ -37,10 +38,10 @@ export function getBackendUrl(): string {
       return ENV_BACKEND_URL || 'http://127.0.0.1:8000';
     }
 
-    // In production, return configured environment URL
-    return ENV_BACKEND_URL;
+    // In production, return configured environment URL or Render backend default
+    return ENV_BACKEND_URL || DEFAULT_PRODUCTION_BACKEND_URL;
   }
-  return ENV_BACKEND_URL || 'http://127.0.0.1:8000';
+  return ENV_BACKEND_URL || DEFAULT_PRODUCTION_BACKEND_URL;
 }
 
 export function setBackendUrl(url: string): void {
@@ -350,6 +351,7 @@ export const api = {
           progress_pct: data.progress_pct || 0,
           current_timestamp: data.current_timestamp,
           error: data.error,
+          error_code: data.error_code,
           metrics: data.metrics,
           created_at: data.created_at || new Date().toISOString()
         };
