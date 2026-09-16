@@ -16,9 +16,17 @@ logger = logging.getLogger(__name__)
 
 def get_ffmpeg_executable() -> str:
     """
-    Locates or initializes the bundled FFmpeg executable from imageio_ffmpeg.
-    Ensures a standard 'ffmpeg.exe' binary exists in the folder and adds its directory to PATH.
+    Locates FFmpeg executable:
+    1. Checks system PATH (standard in Docker / Linux deployments).
+    2. Falls back to bundled FFmpeg executable from imageio_ffmpeg (standard in Windows dev).
+    Ensures standard ffmpeg binary is available and added to PATH for yt-dlp.
     """
+    # 1. System FFmpeg check
+    sys_ffmpeg = shutil.which("ffmpeg")
+    if sys_ffmpeg:
+        return sys_ffmpeg
+
+    # 2. Bundled imageio_ffmpeg fallback
     try:
         import imageio_ffmpeg
         exe_path = imageio_ffmpeg.get_ffmpeg_exe()

@@ -120,11 +120,11 @@ export const DeveloperDrawer: React.FC<DeveloperDrawerProps> = ({ isOpen, onClos
           <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
             {health.ok ? (
               <span className="text-emerald-600 dark:text-emerald-400">
-                Connected to local FastAPI backend v{health.version || '1.0.0'} ({health.engine || 'local'}).
+                Connected to MffConvert backend v{health.version || '2.0.0'} ({health.service || 'api'}).
               </span>
             ) : (
               <span>
-                Operating on built-in cloud service. To attach a custom local engine or external GPU daemon, specify its address below.
+                Backend offline or unreachable. To test or connect a custom backend daemon, specify its address below.
               </span>
             )}
           </div>

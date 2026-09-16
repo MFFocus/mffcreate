@@ -111,44 +111,90 @@ To unlock LLM synthesis and chat:
    *(Or `mistral`, `qwen2.5`, `phi3`)*
 3. MffConvert will auto-detect Ollama running at `http://localhost:11434` and display the active model in the UI header!
 
-## Deployment to Netlify (Public Web Service)
+## Production Deployment
 
-MffConvert is fully configured for zero-setup deployment on Netlify using the Next.js App Router:
+MffConvert uses a decoupled, high-performance web architecture:
+* **Frontend**: Next.js 14 hosted on **Netlify** (or Vercel).
+* **Backend**: FastAPI + FFmpeg + OpenCV + Whisper hosted on **Render**, **Railway**, **Fly.io**, or any Docker-capable VPS.
 
 ```
                   PUBLIC USERS (Mobile / Tablet / Desktop)
                                      │
                                      ▼
                 ┌───────────────────────────────────────────┐
-                │          NETLIFY HOSTED SERVICE           │
+                │             NETLIFY FRONTEND              │
                 │        (https://mffconvert.netlify.app)   │
                 │                                           │
-                │  * Responsive Next.js 14 Frontend         │
-                │  * Instant YouTube TimedText Extraction   │
-                │  * In-Memory Global Duplicate Cache       │
-                │  * Serverless Study Generation Engine     │
-                │  * KaTeX, Mind Map, Flashcards, & Quizzes │
+                │  * Responsive YouTube Player (Watch & Wait│
+                │  * Real-Time Processing Timeline & Stages │
+                │  * 14 Full Study Modules                  │
+                │  * Zero Local Engine Leaks                │
+                └────────────────────┬──────────────────────┘
+                                     │
+                                     ▼ HTTPS (NEXT_PUBLIC_BACKEND_URL)
+                ┌───────────────────────────────────────────┐
+                │          PUBLIC FASTAPI BACKEND           │
+                │     (Render / Railway / Fly.io / VPS)     │
+                │                                           │
+                │  * 0.0.0.0 Binding with dynamic $PORT     │
+                │  * Production CORS Configuration          │
+                │  * Real yt-dlp Video & Subtitle Fetch     │
+                │  * Bundled FFmpeg & OpenCV Slide Extract  │
+                │  * RapidOCR ONNX Formula Recognition      │
+                │  * faster-whisper Speech-to-Text          │
+                │  * Persistent Storage & Auto-Cleanup      │
+                │  * Versioned Deduplication Cache          │
                 └───────────────────────────────────────────┘
 ```
 
-### Deploying Your Own Instance:
-1. Push this repository to GitHub or GitLab.
-2. In Netlify, click **"Add new site" > "Import an existing project"**.
-3. Select your repository. The included [`netlify.toml`](netlify.toml) will automatically configure:
-   - **Base directory**: `frontend`
-   - **Build command**: `npm run build`
-   - **Publish directory**: `.next`
-   - **Next.js Plugin**: `@netlify/plugin-nextjs`
-4. Click **Deploy**. The site is immediately available to public users with **zero local software required**.
+### Step 1: Deploy the Python Backend
+
+You can deploy the backend using the included Dockerfile or Blueprint:
+
+#### Option A: 1-Click Deploy with Render
+1. Go to [Render Dashboard](https://dashboard.render.com/) and click **New > Blueprint**.
+2. Connect your GitHub repository (`https://github.com/MFFocus/mffcreate`).
+3. Render will read [`backend/render.yaml`](backend/render.yaml) automatically.
+4. Render provisions a Docker web service with persistent storage mounted at `/app/data`.
+5. Once deployed, copy your service URL (e.g., `https://mffconvert-backend.onrender.com`).
+
+#### Option B: Deploy with Railway / Docker / VPS
+1. Set the root directory to `backend`.
+2. Build command / Dockerfile: Use the included [`backend/Dockerfile`](backend/Dockerfile).
+3. Set environment variables:
+   * `HOST`: `0.0.0.0`
+   * `PORT`: `8000` (or leave default assigned by platform)
+   * `ALLOWED_ORIGINS`: `https://mffconvert.netlify.app,http://localhost:3000`
+4. Deploy and copy your public backend URL.
+
+### Step 2: Configure Netlify Frontend
+
+1. Go to your [Netlify Site Dashboard](https://app.netlify.com/).
+2. Navigate to **Site configuration > Environment variables**.
+3. Add or edit the variable:
+   * **Key**: `NEXT_PUBLIC_BACKEND_URL`
+   * **Value**: Your public backend URL from Step 1 (e.g., `https://mffconvert-backend.onrender.com`).
+4. Trigger a redeploy:
+   * Go to **Deploys > Trigger deploy > Deploy site**.
+   * Netlify will build the frontend with the configured backend URL.
+
+### Step 3: End-to-End Verification
+
+1. Open your Netlify site URL (e.g., `https://mffconvert.netlify.app`).
+2. Paste any educational YouTube URL (e.g., `https://www.youtube.com/watch?v=rfscVS0vtbw`).
+3. Click **Analyze Video**.
+4. The split-screen processing workspace will immediately open, streaming the YouTube video on the left while the backend processes speech, slides, OCR, and formulas on the right.
+5. Once complete, click **Enter Workspace** to explore all 14 study modules!
 
 ---
 
-## Local Developer / Offline Mode
+## Local Development (Offline Mode)
 
-Developers and offline power users can also run the local Python backend with hardware-accelerated Whisper and local Ollama models:
-
-1. Launch both services with `start.bat` (or manually run `uvicorn main:app` and `npm run dev`).
-2. Press `Ctrl + Shift + D` or click **Developer Console** in the website footer to inspect engine metrics, toggle Ollama LLM, or adjust processing thresholds.
+Local development continues to work seamlessly on your computer:
+1. Double-click `start.bat` (or run `run_backend.bat` and `run_frontend.bat`).
+2. Backend runs at `http://127.0.0.1:8000`.
+3. Frontend runs at `http://localhost:3000`.
+4. The frontend automatically detects `localhost` and routes to `http://127.0.0.1:8000` without manual setup.
 
 ---
 

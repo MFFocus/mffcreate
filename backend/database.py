@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
-DB_DIR = Path(__file__).resolve().parent / "data"
+DB_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent / "data"))
 DB_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = DB_DIR / "mffconvert.db"
+DB_PATH = Path(os.environ.get("DATABASE_PATH", DB_DIR / "mffconvert.db"))
 
 def get_db_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))

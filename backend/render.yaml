@@ -1,0 +1,21 @@
+# Render Blueprint Specification for MffConvert Backend
+services:
+  - type: web
+    name: mffconvert-backend
+    runtime: docker
+    rootDir: backend
+    dockerfilePath: backend/Dockerfile
+    plan: standard
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: ALLOWED_ORIGINS
+        value: https://mffconvert.netlify.app,http://localhost:3000,http://127.0.0.1:3000
+      - key: DATA_DIR
+        value: /app/data
+    disk:
+      name: mffconvert-storage
+      mountPath: /app/data
+      sizeGB: 10

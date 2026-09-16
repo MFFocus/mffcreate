@@ -27,7 +27,9 @@ from database import (
     save_study_materials, get_study_materials,
     save_chat_message, get_chat_history
 )
-from services.downloader import MediaDownloader, extract_canonical_id
+from services.downloader import (
+    MediaDownloader, extract_canonical_id, get_cache_key, PIPELINE_VERSION, MAX_VIDEO_DURATION_SEC
+)
 from services.media_processor import MediaProcessor, cleanup_temp_media
 from services.transcriber import SpeechTranscriber
 from services.frame_extractor import KeyframeExtractor
@@ -40,27 +42,30 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("mffconvert")
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
 MEDIA_DIR = DATA_DIR / "projects"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_DIR = Path(os.environ.get("TEMP_DIR", DATA_DIR / "temp"))
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# Concurrency semaphore: max 2 active multimodal processing pipelines concurrently
-JOB_SEMAPHORE = threading.Semaphore(2)
+# Concurrency semaphore: max concurrent processing pipelines (configurable via env)
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "2"))
+JOB_SEMAPHORE = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
 app = FastAPI(
     title="MffConvert API",
-    description="Free and local-first AI educational video study tool",
-    version="1.0.0"
+    description="Free educational video study workspace generation API",
+    version="2.0.0"
 )
 
-# Configurable CORS for local development and Netlify deployment
+# Configurable CORS supporting local frontend, Netlify production, and custom domains
 allowed_origins_raw = os.environ.get(
     "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000"
+    "http://localhost:3000,http://127.0.0.1:3000,https://mffconvert.netlify.app"
 )
-allowed_origins = [orig.strip() for orig in allowed_origins_raw.split(",") if orig.strip() and not orig.strip().startswith("https://*")]
+allowed_origins = [orig.strip() for orig in allowed_origins_raw.split(",") if orig.strip()]
 
-# Support Netlify subdomain deployments via regex (e.g., https://*.netlify.app)
+# Regex to safely match any Netlify deploy preview or production subdomains
 origin_regex = os.environ.get("CORS_ORIGIN_REGEX", r"^https://([a-zA-Z0-9_-]+\.)*netlify\.app$")
 
 app.add_middleware(
@@ -68,8 +73,9 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_origin_regex=origin_regex,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"]
 )
 
 @app.get("/health")
@@ -314,16 +320,19 @@ async def get_system_status():
 def create_job(req: JobCreateRequest, background_tasks: BackgroundTasks):
     """
     Submits a video URL for processing.
-    Includes instant deduplication: if this video has already been processed, returns immediately!
+    Includes instant deduplication: if this video has already been processed with matching version & config, returns immediately!
     """
     url_clean = req.url.strip()
-    url_hash = extract_canonical_id(url_clean)
+    if not url_clean or not (url_clean.startswith("http://") or url_clean.startswith("https://") or "youtu" in url_clean):
+        raise HTTPException(status_code=400, detail="A valid YouTube or web video URL is required.")
+
+    cache_key = get_cache_key(url_clean, req.whisper_model or "base", req.llm_model)
 
     # 1. Check if already completed -> Return immediately!
-    if url_hash:
-        completed = get_completed_project_by_url_hash(url_hash)
+    if cache_key:
+        completed = get_completed_project_by_url_hash(cache_key)
         if completed:
-            logger.info(f"Cache hit for URL hash {url_hash}: returning completed project {completed['id']}")
+            logger.info(f"Versioned cache hit for {cache_key}: returning completed project {completed['id']}")
             return {
                 "job_id": completed["id"],
                 "project_id": completed["id"],
@@ -333,9 +342,9 @@ def create_job(req: JobCreateRequest, background_tasks: BackgroundTasks):
             }
 
         # 2. Check if currently active/processing -> Attach to existing job
-        active = get_active_project_by_url_hash(url_hash)
+        active = get_active_project_by_url_hash(cache_key)
         if active:
-            logger.info(f"Attaching to active job {active['id']} for URL hash {url_hash}")
+            logger.info(f"Attaching to active job {active['id']} for {cache_key}")
             return {
                 "job_id": active["id"],
                 "project_id": active["id"],
@@ -347,7 +356,7 @@ def create_job(req: JobCreateRequest, background_tasks: BackgroundTasks):
     # 3. Create new job
     project_id = str(uuid.uuid4())[:8]
     title = req.title or "Processing Lecture..."
-    create_project(project_id, title, "url", source_url=url_clean, source_url_hash=url_hash)
+    create_project(project_id, title, "url", source_url=url_clean, source_url_hash=cache_key or extract_canonical_id(url_clean))
 
     background_tasks.add_task(
         run_processing_pipeline,
@@ -521,4 +530,8 @@ def export_materials(project_id: str, export_format: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", 8000))
+    is_dev = os.environ.get("ENV", "production").lower() == "development"
+    logger.info(f"Starting MffConvert API daemon on {host}:{port} (env={os.environ.get('ENV', 'production')}, reload={is_dev})")
+    uvicorn.run("main:app", host=host, port=port, reload=is_dev)

@@ -116,7 +116,7 @@ export default function StudyWorkspacePage() {
         }
       } catch (err: any) {
         setError(
-          "We couldn't connect to MffConvert right now. Please check that your local engine is running."
+          err?.message || "We couldn't finish analyzing this video. You can try again or choose another video."
         );
         clearInterval(interval);
       }
@@ -169,12 +169,12 @@ export default function StudyWorkspacePage() {
         <Navbar activeProjectId={projectId} />
         <div className="flex-1 flex items-center justify-center p-6">
           <div className="max-w-md w-full rounded-3xl border border-slate-200 bg-white p-8 text-center space-y-5 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
-            <div className="flex h-12 w-12 mx-auto items-center justify-center rounded-2xl bg-red-500/10 text-red-500">
+            <div className="flex h-12 w-12 mx-auto items-center justify-center rounded-2xl bg-amber-500/10 text-amber-500">
               <AlertCircle className="h-6 w-6" />
             </div>
             <div className="space-y-2">
               <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-                Unable to Load Study Workspace
+                We couldn&apos;t finish analyzing this video
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                 {error}
@@ -189,18 +189,17 @@ export default function StudyWorkspacePage() {
                 <span>Try Again</span>
               </button>
               <Link
-                href={`/study/${SAMPLE_PROJECT_ID}`}
+                href="/"
                 className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 transition-colors"
+              >
+                <span>Choose Another Video</span>
+              </Link>
+              <Link
+                href={`/study/${SAMPLE_PROJECT_ID}`}
+                className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-500 hover:text-slate-900 dark:border-slate-800 dark:text-slate-400 dark:hover:text-white transition-colors"
               >
                 <Compass className="h-3.5 w-3.5" />
                 <span>Explore Sample</span>
-              </Link>
-              <Link
-                href="/"
-                className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-500 hover:text-slate-900 dark:border-slate-800 dark:text-slate-400 dark:hover:text-white transition-colors"
-              >
-                <ArrowLeft className="h-3.5 w-3.5" />
-                <span>Home</span>
               </Link>
             </div>
           </div>

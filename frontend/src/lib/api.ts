@@ -1,7 +1,8 @@
 /**
- * Dynamic API client for MffConvert.
- * Connects the frontend (hosted on Netlify or locally) to the user's local processing engine.
- * Zero cloud dependencies, zero API keys, 100% privacy-focused.
+ * Production-ready API client for MffConvert.
+ * Connects the Netlify frontend to the public FastAPI backend.
+ * Local development defaults to http://127.0.0.1:8000.
+ * Production uses NEXT_PUBLIC_BACKEND_URL.
  */
 
 import {
@@ -12,29 +13,34 @@ import {
   SAMPLE_TRANSCRIPT,
 } from './sampleData';
 
-// In production (Netlify or custom domain), default to same origin ("") so requests route to native Next.js API.
-// In local development, can be configured via environment variable or developer drawer.
-const ENV_BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL;
+const ENV_BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL || '').trim().replace(/\/+$/, '');
 
 export function getBackendUrl(): string {
   if (typeof window !== 'undefined') {
-    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const hostname = window.location.hostname;
+    const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0';
+
+    // Check if developer manually set an endpoint in Developer Drawer
     const stored = localStorage.getItem('mffconvert_backend_url');
     if (stored && stored.trim()) {
       const clean = stored.trim().replace(/\/+$/, '');
-      // On public production domains (Netlify, etc.), clear stale local addresses
-      if (!isLocalhost && (clean.includes('localhost') || clean.includes('127.0.0.1'))) {
+      // On public domains, ignore stale localhost configurations
+      if (!isLocal && (clean.includes('localhost') || clean.includes('127.0.0.1') || clean.includes('8000'))) {
         localStorage.removeItem('mffconvert_backend_url');
       } else {
         return clean;
       }
     }
-    // If running on a public domain (e.g. *.netlify.app or custom domain), use same origin
-    if (!isLocalhost && !ENV_BACKEND_URL) {
-      return '';
+
+    // In local development, default to local FastAPI port 8000
+    if (isLocal) {
+      return ENV_BACKEND_URL || 'http://127.0.0.1:8000';
     }
+
+    // In production, return configured environment URL
+    return ENV_BACKEND_URL;
   }
-  return (ENV_BACKEND_URL || '').replace(/\/+$/, '');
+  return ENV_BACKEND_URL || 'http://127.0.0.1:8000';
 }
 
 export function setBackendUrl(url: string): void {
@@ -144,6 +150,26 @@ export interface Question {
   solution: string;
   timestamp: number;
   source?: string;
+  difficulty?: 'easy' | 'medium' | 'hard';
+}
+export type SolvedQuestion = Question;
+
+export interface Flashcard {
+  id: number;
+  front: string;
+  back: string;
+  tag: string;
+  timestamp: number;
+  topic?: string;
+}
+
+export interface QuizQuestion {
+  id: number;
+  question: string;
+  options: string[];
+  correct_index: number;
+  explanation: string;
+  timestamp: number;
 }
 
 export interface MindMapNode {
@@ -160,24 +186,13 @@ export interface MindMapEdge {
   label?: string;
 }
 
-export interface Flashcard {
-  id: number;
-  front: string;
-  back: string;
-  tag: string;
-  timestamp: number;
-}
-
-export interface QuizQuestion {
-  id: number;
-  question: string;
-  options: string[];
-  correct_index: number;
-  explanation: string;
-  timestamp: number;
-}
-
 export interface StudyMaterials {
+  overview?: {
+    summary: string;
+    key_takeaways: string[];
+    difficulty_level: string;
+    prerequisites: string[];
+  };
   deep_notes: string;
   short_notes: string;
   chapters: Chapter[];
@@ -190,12 +205,13 @@ export interface StudyMaterials {
 
 export interface SearchResult {
   id: string;
-  source_type: 'formula' | 'question' | 'diagram' | 'slide' | 'transcript';
+  source_type: 'speech' | 'slide' | 'formula' | 'question' | 'transcript' | 'diagram';
   title: string;
   snippet: string;
   timestamp: number;
-  thumbnail?: string;
   score: number;
+  thumbnail?: string;
+  frame_thumbnail?: string;
 }
 
 export interface SystemStatus {
@@ -210,24 +226,44 @@ export interface SystemStatus {
   default_engine: string;
 }
 
-function sanitizeErrorMessage(err: any): string {
+export function sanitizeErrorMessage(err: any): string {
   const msg = (err?.message || String(err || '')).toLowerCase();
+
+  // Log technical details only on developer side
+  if (typeof window !== 'undefined') {
+    console.error('[MffConvert API Error]', err);
+  }
+
   if (
     msg.includes('failed to fetch') ||
     msg.includes('networkerror') ||
     msg.includes('connection refused') ||
     msg.includes('connectionrefused') ||
-    msg.includes('127.0.0.1') ||
-    msg.includes('localhost')
+    msg.includes('load failed')
   ) {
-    return "We couldn't connect to MffConvert right now. Please ensure your local processing engine is running.";
+    return "Unable to connect to the MffConvert processing service. Please check your internet connection and try again.";
   }
-  return err?.message || 'An unexpected error occurred. Please try again.';
+
+  if (msg.includes('connecting') || msg.includes('missing backend') || msg.includes('backend service')) {
+    return "MffConvert service is currently connecting. Please try again in a few moments.";
+  }
+
+  if (msg.includes('500') || msg.includes('internal server') || msg.includes('traceback') || msg.includes('exception')) {
+    return "We couldn't finish analyzing this video. Please try again or choose another video.";
+  }
+
+  // Censor any accidental IP / localhost mentions in error messages
+  if (msg.includes('127.0.0.1') || msg.includes('localhost') || msg.includes('8000')) {
+    return "We couldn't finish analyzing this video. Please try again.";
+  }
+
+  return err?.message || "We couldn't finish analyzing this video. Please try again.";
 }
 
 export const api = {
   async checkHealth(customUrl?: string): Promise<HealthStatus> {
     const baseUrl = (customUrl || getBackendUrl()).replace(/\/+$/, '');
+    if (!baseUrl) return { ok: false };
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3500);
@@ -244,8 +280,18 @@ export const api = {
   },
 
   async getSystemStatus(): Promise<SystemStatus> {
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) {
+      return {
+        status: 'connecting',
+        zero_cost: true,
+        privacy_mode: 'Public Web Service',
+        ollama: { available: false, models: [] },
+        default_engine: 'Multimodal Processing Engine'
+      };
+    }
     try {
-      const res = await fetch(`${getBackendUrl()}/api/system/status`);
+      const res = await fetch(`${baseUrl}/api/system/status`);
       if (!res.ok) throw new Error('Failed to fetch system status');
       return res.json();
     } catch (err: any) {
@@ -259,35 +305,23 @@ export const api = {
     whisperModel: string = 'base',
     llmModel?: string
   ): Promise<{ job_id: string; project_id: string; status: JobStatus; cached?: boolean; title?: string }> {
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) {
+      throw new Error("MffConvert service is currently connecting. Please try again shortly.");
+    }
     try {
-      const res = await fetch(`${getBackendUrl()}/api/jobs`, {
+      const res = await fetch(`${baseUrl}/api/jobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, title, whisper_model: whisperModel, llm_model: llmModel }),
       });
       if (!res.ok) {
-        // Fallback to processUrl if /api/jobs is unavailable
-        const fallback = await this.processUrl(url, title, whisperModel, llmModel);
-        return {
-          job_id: fallback.project_id,
-          project_id: fallback.project_id,
-          status: 'queued',
-          cached: false
-        };
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.detail || 'Unable to start video analysis.');
       }
       return res.json();
     } catch (err: any) {
-      try {
-        const fallback = await this.processUrl(url, title, whisperModel, llmModel);
-        return {
-          job_id: fallback.project_id,
-          project_id: fallback.project_id,
-          status: 'queued',
-          cached: false
-        };
-      } catch {
-        throw new Error(sanitizeErrorMessage(err));
-      }
+      throw new Error(sanitizeErrorMessage(err));
     }
   },
 
@@ -295,12 +329,16 @@ export const api = {
     if (jobId === SAMPLE_PROJECT_ID) {
       return SAMPLE_PROJECT;
     }
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) {
+      throw new Error("MffConvert service is currently connecting.");
+    }
     try {
-      const res = await fetch(`${getBackendUrl()}/api/jobs/${jobId}`);
+      const res = await fetch(`${baseUrl}/api/jobs/${jobId}`);
       if (res.ok) {
         const data = await res.json();
         return {
-          id: data.job_id || data.project_id,
+          id: data.job_id || data.project_id || jobId,
           title: data.title || 'Educational Lecture',
           source_type: 'url',
           source_url: data.source_url,
@@ -327,25 +365,16 @@ export const api = {
     whisperModel: string = 'base',
     llmModel?: string
   ): Promise<{ project_id: string }> {
-    try {
-      const res = await fetch(`${getBackendUrl()}/api/process/url`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, title, whisper_model: whisperModel, llm_model: llmModel }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: 'Failed to process video link' }));
-        throw new Error(err.detail || 'Failed to process video link');
-      }
-      return res.json();
-    } catch (err: any) {
-      throw new Error(sanitizeErrorMessage(err));
-    }
+    return this.createJob(url, title, whisperModel, llmModel);
   },
 
   async processUpload(formData: FormData): Promise<{ project_id: string }> {
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) {
+      throw new Error("MffConvert service is currently connecting.");
+    }
     try {
-      const res = await fetch(`${getBackendUrl()}/api/process/upload`, {
+      const res = await fetch(`${baseUrl}/api/process/upload`, {
         method: 'POST',
         body: formData,
       });
@@ -360,13 +389,14 @@ export const api = {
   },
 
   async getProjects(): Promise<Project[]> {
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) return [];
     try {
-      const res = await fetch(`${getBackendUrl()}/api/projects`);
-      if (!res.ok) throw new Error('Failed to fetch projects');
+      const res = await fetch(`${baseUrl}/api/projects`);
+      if (!res.ok) return [];
       const list: Project[] = await res.json();
-      return list;
+      return list || [];
     } catch {
-      // Return empty list if offline
       return [];
     }
   },
@@ -375,8 +405,12 @@ export const api = {
     if (id === SAMPLE_PROJECT_ID) {
       return SAMPLE_PROJECT;
     }
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) {
+      throw new Error("MffConvert service is currently connecting.");
+    }
     try {
-      const res = await fetch(`${getBackendUrl()}/api/projects/${id}`);
+      const res = await fetch(`${baseUrl}/api/projects/${id}`);
       if (!res.ok) throw new Error('Study workspace not found');
       return res.json();
     } catch (err: any) {
@@ -386,8 +420,10 @@ export const api = {
 
   async deleteProject(id: string): Promise<void> {
     if (id === SAMPLE_PROJECT_ID) return;
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) return;
     try {
-      await fetch(`${getBackendUrl()}/api/projects/${id}`, { method: 'DELETE' });
+      await fetch(`${baseUrl}/api/projects/${id}`, { method: 'DELETE' });
     } catch (err: any) {
       throw new Error(sanitizeErrorMessage(err));
     }
@@ -397,8 +433,12 @@ export const api = {
     if (id === SAMPLE_PROJECT_ID) {
       return SAMPLE_TRANSCRIPT;
     }
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) {
+      throw new Error("MffConvert service is currently connecting.");
+    }
     try {
-      const res = await fetch(`${getBackendUrl()}/api/projects/${id}/transcript`);
+      const res = await fetch(`${baseUrl}/api/projects/${id}/transcript`);
       if (!res.ok) throw new Error('Transcript is still being generated');
       return res.json();
     } catch (err: any) {
@@ -410,10 +450,16 @@ export const api = {
     if (id === SAMPLE_PROJECT_ID) {
       return SAMPLE_KEYFRAMES;
     }
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) return [];
     try {
-      const res = await fetch(`${getBackendUrl()}/api/projects/${id}/keyframes`);
+      const res = await fetch(`${baseUrl}/api/projects/${id}/keyframes`);
       if (!res.ok) return [];
-      return res.json();
+      const list = await res.json();
+      return (list || []).map((kf: any) => ({
+        ...kf,
+        image_path: kf.image_filename ? `${baseUrl}/media/${id}/frames/${kf.image_filename}` : undefined
+      }));
     } catch {
       return [];
     }
@@ -423,8 +469,12 @@ export const api = {
     if (id === SAMPLE_PROJECT_ID) {
       return SAMPLE_STUDY;
     }
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) {
+      throw new Error("MffConvert service is currently connecting.");
+    }
     try {
-      const res = await fetch(`${getBackendUrl()}/api/projects/${id}/study`);
+      const res = await fetch(`${baseUrl}/api/projects/${id}/study`);
       if (!res.ok) throw new Error('Study materials are still being synthesized');
       return res.json();
     } catch (err: any) {
@@ -437,7 +487,6 @@ export const api = {
       const query = q.toLowerCase();
       const results: SearchResult[] = [];
 
-      // Search formulas
       if (filter === 'all' || filter === 'formula') {
         SAMPLE_STUDY.formulas.forEach((f) => {
           if (f.name.toLowerCase().includes(query) || f.explanation.toLowerCase().includes(query) || f.latex.toLowerCase().includes(query)) {
@@ -453,7 +502,6 @@ export const api = {
         });
       }
 
-      // Search questions
       if (filter === 'all' || filter === 'question') {
         SAMPLE_STUDY.questions.forEach((qu) => {
           if (qu.question.toLowerCase().includes(query) || qu.solution.toLowerCase().includes(query)) {
@@ -469,7 +517,6 @@ export const api = {
         });
       }
 
-      // Search transcript
       if (filter === 'all' || filter === 'transcript') {
         SAMPLE_TRANSCRIPT.segments.forEach((seg) => {
           if (seg.text.toLowerCase().includes(query)) {
@@ -488,9 +535,11 @@ export const api = {
       return results;
     }
 
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) return [];
     try {
       const params = new URLSearchParams({ q, filter });
-      const res = await fetch(`${getBackendUrl()}/api/projects/${id}/search?${params.toString()}`);
+      const res = await fetch(`${baseUrl}/api/projects/${id}/search?${params.toString()}`);
       if (!res.ok) throw new Error('Search failed');
       return res.json();
     } catch (err: any) {
@@ -521,8 +570,12 @@ export const api = {
       }
     }
 
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) {
+      throw new Error("MffConvert service is currently connecting.");
+    }
     try {
-      const res = await fetch(`${getBackendUrl()}/api/projects/${id}/chat`, {
+      const res = await fetch(`${baseUrl}/api/projects/${id}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message }),
@@ -538,8 +591,10 @@ export const api = {
     id: string
   ): Promise<Array<{ id: number; role: 'user' | 'assistant'; content: string; timestamps: number[] }>> {
     if (id === SAMPLE_PROJECT_ID) return [];
+    const baseUrl = getBackendUrl();
+    if (!baseUrl) return [];
     try {
-      const res = await fetch(`${getBackendUrl()}/api/projects/${id}/chat/history`);
+      const res = await fetch(`${baseUrl}/api/projects/${id}/chat/history`);
       if (!res.ok) return [];
       return res.json();
     } catch {
@@ -548,14 +603,17 @@ export const api = {
   },
 
   getMediaUrl(projectId: string, filename: string): string {
-    return `${getBackendUrl()}/media/${projectId}/frames/${filename}`;
+    const baseUrl = getBackendUrl();
+    return `${baseUrl}/media/${projectId}/frames/${filename}`;
   },
 
   getVideoStreamUrl(projectId: string, filename: string): string {
-    return `${getBackendUrl()}/media/${projectId}/${filename}`;
+    const baseUrl = getBackendUrl();
+    return `${baseUrl}/media/${projectId}/${filename}`;
   },
 
   getExportUrl(projectId: string, format: 'markdown' | 'html' | 'anki'): string {
-    return `${getBackendUrl()}/api/projects/${projectId}/export/${format}`;
+    const baseUrl = getBackendUrl();
+    return `${baseUrl}/api/projects/${projectId}/export/${format}`;
   },
 };

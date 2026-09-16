@@ -62,6 +62,23 @@ def extract_canonical_id(url: str) -> str:
     except Exception:
         return f"hash:{hashlib.sha256(clean_url.encode('utf-8')).hexdigest()[:16]}"
 
+PIPELINE_VERSION = "v2"
+
+def get_cache_key(url: str, whisper_model: str = "base", llm_model: Optional[str] = None) -> str:
+    """
+    Computes a deterministic, versioned cache key incorporating:
+    - Canonical video identifier (YouTube ID or normalized URL hash)
+    - Multimodal pipeline version
+    - Selected speech model & LLM model configuration
+    Ensures that when analysis pipeline changes, stale results are never returned.
+    """
+    canonical_id = extract_canonical_id(url)
+    if not canonical_id:
+        return ""
+    llm_part = (llm_model or "heuristic").strip().lower()
+    whisper_part = (whisper_model or "base").strip().lower()
+    return f"{canonical_id}:{PIPELINE_VERSION}:{whisper_part}:{llm_part}"
+
 class MediaDownloader:
     def __init__(self, storage_dir: Path):
         self.storage_dir = storage_dir
