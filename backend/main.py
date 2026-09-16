@@ -8,7 +8,7 @@ import uuid
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional, List
+from typing import Any, Dict, Optional
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
