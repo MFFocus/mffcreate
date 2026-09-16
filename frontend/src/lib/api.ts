@@ -107,6 +107,7 @@ export interface Project {
   progress_pct: number;
   current_timestamp?: number;
   error?: string;
+  error_code?: string;
   metrics?: ProjectMetrics;
   created_at: string;
 }

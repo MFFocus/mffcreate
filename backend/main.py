@@ -28,7 +28,8 @@ from database import (
     save_chat_message, get_chat_history
 )
 from services.downloader import (
-    MediaDownloader, extract_canonical_id, get_cache_key, PIPELINE_VERSION, MAX_VIDEO_DURATION_SEC
+    MediaDownloader, extract_canonical_id, get_cache_key, PIPELINE_VERSION, MAX_VIDEO_DURATION_SEC,
+    MediaAcquisitionError
 )
 from services.media_processor import MediaProcessor, cleanup_temp_media
 from services.transcriber import SpeechTranscriber
@@ -49,7 +50,7 @@ TEMP_DIR = Path(os.environ.get("TEMP_DIR", DATA_DIR / "temp"))
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # Concurrency semaphore: max concurrent processing pipelines (configurable via env)
-MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "2"))
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "1"))
 JOB_SEMAPHORE = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
 app = FastAPI(
@@ -195,16 +196,18 @@ def run_processing_pipeline(project_id: str, source_type: str, source_val: str, 
         # Phase 1: Downloading
         update_job_stage(project_id, "downloading", "Acquiring video stream...", 8)
         subtitle_path = None
+        has_video = True
         if source_type == "url":
             media_info = downloader.download_url(
                 source_val,
                 project_id,
                 progress_callback=lambda pct: update_job_stage(project_id, "downloading", f"Acquiring video ({pct}%)...", int(8 + pct * 0.12))
             )
-            video_path = media_info["video_path"]
+            video_path = media_info.get("video_path")
             title = media_info["title"]
             duration = media_info["duration"]
             subtitle_path = media_info.get("subtitle_path")
+            has_video = media_info.get("has_video", True)
             metrics["download_sec"] = media_info.get("download_sec", 0.0)
         else: # local file
             video_path = source_val
@@ -213,13 +216,15 @@ def run_processing_pipeline(project_id: str, source_type: str, source_val: str, 
 
         update_project_media(project_id, title=title, duration=duration, video_path=video_path)
 
-        # Phase 2: Audio Extraction
-        audio_start = time.time()
-        update_job_stage(project_id, "extracting", "Extracting high-clarity audio...", 22)
-        audio_wav = str(MEDIA_DIR / project_id / "audio_16k.wav")
-        processor.extract_audio(video_path, audio_wav)
-        update_project_media(project_id, audio_path=audio_wav)
-        metrics["audio_sec"] = round(time.time() - audio_start, 2)
+        audio_wav = None
+        if has_video and video_path:
+            # Phase 2: Audio Extraction
+            audio_start = time.time()
+            update_job_stage(project_id, "extracting", "Extracting high-clarity audio...", 22)
+            audio_wav = str(MEDIA_DIR / project_id / "audio_16k.wav")
+            processor.extract_audio(video_path, audio_wav)
+            update_project_media(project_id, audio_path=audio_wav)
+            metrics["audio_sec"] = round(time.time() - audio_start, 2)
 
         # Phase 3: Speech Recognition & Alignment
         update_job_stage(project_id, "transcribing", "Understanding speech & timestamps...", 28)
@@ -228,34 +233,46 @@ def run_processing_pipeline(project_id: str, source_type: str, source_val: str, 
             trans_result = parse_vtt_subtitles(subtitle_path)
 
         if not trans_result:
-            local_transcriber = SpeechTranscriber(model_size=whisper_model)
-            trans_result = local_transcriber.transcribe(
-                audio_wav,
-                progress_callback=lambda pct: update_job_stage(project_id, "transcribing", f"Understanding speech ({pct}%)...", int(28 + pct * 0.26))
-            )
+            if audio_wav and Path(audio_wav).exists():
+                local_transcriber = SpeechTranscriber(model_size=whisper_model)
+                trans_result = local_transcriber.transcribe(
+                    audio_wav,
+                    progress_callback=lambda pct: update_job_stage(project_id, "transcribing", f"Understanding speech ({pct}%)...", int(28 + pct * 0.26))
+                )
+            else:
+                raise MediaAcquisitionError(
+                    "Speech stream unavailable for this video.",
+                    error_code="TRANSCRIPTION_FAILED",
+                    user_message="Could not transcribe audio from this video stream."
+                )
 
         save_transcript(project_id, trans_result["full_text"], trans_result["segments"])
         metrics["transcribe_sec"] = trans_result.get("transcribe_sec", 0.0)
 
-        # Phase 4: Keyframe scene & visual detection
-        v_start = time.time()
-        update_job_stage(project_id, "analyzing_visuals", "Reading slides & visual transitions...", 56)
-        keyframes = frame_extractor.extract_keyframes(
-            video_path,
-            project_id,
-            progress_callback=lambda pct: update_job_stage(project_id, "analyzing_visuals", f"Reading slides ({pct}%)...", int(56 + pct * 0.16))
-        )
-        metrics["visual_sec"] = round(time.time() - v_start, 2)
+        # Phase 4 & 5: Visual detection and OCR
+        if has_video and video_path:
+            v_start = time.time()
+            update_job_stage(project_id, "analyzing_visuals", "Reading slides & visual transitions...", 56)
+            keyframes = frame_extractor.extract_keyframes(
+                video_path,
+                project_id,
+                progress_callback=lambda pct: update_job_stage(project_id, "analyzing_visuals", f"Reading slides ({pct}%)...", int(56 + pct * 0.16))
+            )
+            metrics["visual_sec"] = round(time.time() - v_start, 2)
 
-        # Phase 5: Visual content & formula detection (OCR)
-        ocr_start = time.time()
-        update_job_stage(project_id, "reading_text", "Recognizing formulas & slide text...", 72)
-        enriched_keyframes = ocr_engine.process_keyframes(
-            keyframes,
-            progress_callback=lambda pct: update_job_stage(project_id, "reading_text", f"Recognizing slide text ({pct}%)...", int(72 + pct * 0.12))
-        )
-        save_keyframes(project_id, enriched_keyframes)
-        metrics["ocr_sec"] = round(time.time() - ocr_start, 2)
+            ocr_start = time.time()
+            update_job_stage(project_id, "reading_text", "Recognizing formulas & slide text...", 72)
+            enriched_keyframes = ocr_engine.process_keyframes(
+                keyframes,
+                progress_callback=lambda pct: update_job_stage(project_id, "reading_text", f"Recognizing slide text ({pct}%)...", int(72 + pct * 0.12))
+            )
+            save_keyframes(project_id, enriched_keyframes)
+            metrics["ocr_sec"] = round(time.time() - ocr_start, 2)
+        else:
+            # Safe caption fallback: No video frames available; save empty keyframes without fabricating
+            logger.info(f"Visual processing skipped for project {project_id} (caption-only mode)")
+            save_keyframes(project_id, [])
+            enriched_keyframes = []
 
         # Phase 6: Study workspace synthesis
         update_job_stage(project_id, "generating_notes", "Synthesizing deep notes with LaTeX...", 85)
@@ -288,17 +305,34 @@ def run_processing_pipeline(project_id: str, source_type: str, source_val: str, 
         update_job_stage(project_id, "completed", "Study workspace ready!", 100, metrics=metrics)
         logger.info(f"Pipeline successfully completed for project {project_id} in {metrics['total_sec']}s (Metrics: {metrics})")
 
+    except MediaAcquisitionError as mae:
+        logger.error(f"Pipeline media acquisition error for project {project_id} [{mae.error_code}]: {mae}")
+        metrics["total_sec"] = round(time.time() - pipeline_start, 2)
+        update_job_stage(
+            project_id,
+            "failed",
+            mae.user_message,
+            0,
+            error=mae.user_message,
+            error_code=mae.error_code,
+            metrics=metrics
+        )
+
     except Exception as e:
         logger.exception(f"Pipeline failed for project {project_id}: {e}")
         # Clean user-facing error message without internal traces
         err_msg = str(e)
         if "exceeds the maximum allowed limit" in err_msg:
             friendly_err = err_msg
+            code = "DURATION_EXCEEDED"
         elif "Could not access or download" in err_msg:
             friendly_err = "The video could not be accessed. Please check if the video is public and available."
+            code = "VIDEO_UNAVAILABLE"
         else:
-            friendly_err = f"Unable to process video: {err_msg}"
-        update_job_stage(project_id, "failed", friendly_err, 0, error=err_msg, metrics=metrics)
+            friendly_err = "Unable to process video. Please verify the link is a public educational video."
+            code = "PIPELINE_ERROR"
+        metrics["total_sec"] = round(time.time() - pipeline_start, 2)
+        update_job_stage(project_id, "failed", friendly_err, 0, error=friendly_err, error_code=code, metrics=metrics)
 
     finally:
         if acquired:
@@ -387,6 +421,7 @@ def get_job_status(job_id: str):
         "stage": proj["stage"],
         "progress_pct": proj["progress_pct"],
         "error": proj.get("error"),
+        "error_code": proj.get("error_code"),
         "duration": proj.get("duration", 0),
         "metrics": proj.get("metrics"),
         "created_at": proj["created_at"]

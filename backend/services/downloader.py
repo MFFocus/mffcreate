@@ -3,6 +3,7 @@ Educational Video Downloader & Ingest Service.
 Supports YouTube, Vimeo, direct MP4/WebM URLs, and local file uploads.
 Fully compliant with copyright and platform guidelines. No DRM or paywall bypass.
 Uses bundled FFmpeg for seamless format merging.
+Zero personal cookies or user credentials required.
 """
 
 import os
@@ -22,6 +23,110 @@ logger = logging.getLogger(__name__)
 
 # Maximum video duration allowed for public web service (2.5 hours = 9000 seconds)
 MAX_VIDEO_DURATION_SEC = 9000
+
+PIPELINE_VERSION = "v2"
+
+# Conservative multi-client extractor arguments for YouTube.
+# Uses legitimate Android and iOS mobile Innertube endpoints which avoid
+# the web-only bot challenges frequently encountered on cloud datacenter IPs.
+BASE_YTDL_EXTRACTOR_ARGS = {
+    'youtube': {
+        'player_client': ['android', 'ios', 'web'],
+        'player_skip': ['webpage', 'configs'],
+    }
+}
+
+
+# =====================================================================
+# Domain Exceptions & Error Classification
+# =====================================================================
+
+class MediaAcquisitionError(Exception):
+    """Base exception for media acquisition failures."""
+    def __init__(self, message: str, error_code: str = "DOWNLOAD_FAILED", user_message: Optional[str] = None):
+        super().__init__(message)
+        self.error_code = error_code
+        self.user_message = user_message or "We couldn't finish downloading this video. Please try another educational video."
+
+class YouTubeBotCheckError(MediaAcquisitionError):
+    def __init__(self, message: str = "YouTube bot detection triggered"):
+        super().__init__(
+            message,
+            error_code="YOUTUBE_BOT_CHECK",
+            user_message="YouTube is temporarily limiting automated access to this video. Please try another public educational video or try again later."
+        )
+
+class VideoPrivateError(MediaAcquisitionError):
+    def __init__(self, message: str = "Video is private"):
+        super().__init__(
+            message,
+            error_code="VIDEO_PRIVATE",
+            user_message="This video is set to private on YouTube and cannot be analyzed."
+        )
+
+class VideoUnavailableError(MediaAcquisitionError):
+    def __init__(self, message: str = "Video is unavailable"):
+        super().__init__(
+            message,
+            error_code="VIDEO_UNAVAILABLE",
+            user_message="This video is unavailable or no longer exists on YouTube."
+        )
+
+class VideoAgeRestrictedError(MediaAcquisitionError):
+    def __init__(self, message: str = "Video is age-restricted"):
+        super().__init__(
+            message,
+            error_code="VIDEO_AGE_RESTRICTED",
+            user_message="This video is age-restricted on YouTube and requires account authentication."
+        )
+
+class VideoRegionRestrictedError(MediaAcquisitionError):
+    def __init__(self, message: str = "Video is region-restricted"):
+        super().__init__(
+            message,
+            error_code="VIDEO_REGION_RESTRICTED",
+            user_message="This video is region-restricted on YouTube and cannot be accessed from this server location."
+        )
+
+class VideoDurationLimitError(MediaAcquisitionError):
+    def __init__(self, curr_hrs: float, max_hrs: float):
+        super().__init__(
+            f"Video duration ({curr_hrs} hours) exceeds limit ({max_hrs} hours)",
+            error_code="DURATION_EXCEEDED",
+            user_message=f"This video is {curr_hrs} hours long, which exceeds the maximum limit of {max_hrs} hours for public processing."
+        )
+
+
+def classify_yt_error(err_str: str) -> MediaAcquisitionError:
+    """
+    Inspects raw yt-dlp error output and maps to a classified domain exception
+    with machine-readable error codes and consumer-friendly messaging.
+    """
+    lower = err_str.lower()
+    if (
+        "sign in to confirm you’re not a bot" in lower
+        or "sign in to confirm you're not a bot" in lower
+        or "confirm you’re not a bot" in lower
+        or "confirm you're not a bot" in lower
+        or "bot verification" in lower
+        or "use --cookies" in lower
+    ):
+        return YouTubeBotCheckError(err_str)
+    elif "private video" in lower or "this video is private" in lower:
+        return VideoPrivateError(err_str)
+    elif "video unavailable" in lower or "does not exist" in lower or "has been removed" in lower:
+        return VideoUnavailableError(err_str)
+    elif "sign in to confirm your age" in lower or "age-restricted" in lower or "inappropriate for some users" in lower:
+        return VideoAgeRestrictedError(err_str)
+    elif "not available in your country" in lower or "blocked in your country" in lower or "geo restricted" in lower:
+        return VideoRegionRestrictedError(err_str)
+    else:
+        return MediaAcquisitionError(err_str, error_code="DOWNLOAD_FAILED")
+
+
+# =====================================================================
+# Canonical ID & Versioned Cache Key
+# =====================================================================
 
 def extract_canonical_id(url: str) -> str:
     """
@@ -62,7 +167,6 @@ def extract_canonical_id(url: str) -> str:
     except Exception:
         return f"hash:{hashlib.sha256(clean_url.encode('utf-8')).hexdigest()[:16]}"
 
-PIPELINE_VERSION = "v2"
 
 def get_cache_key(url: str, whisper_model: str = "base", llm_model: Optional[str] = None) -> str:
     """
@@ -79,6 +183,11 @@ def get_cache_key(url: str, whisper_model: str = "base", llm_model: Optional[str
     whisper_part = (whisper_model or "base").strip().lower()
     return f"{canonical_id}:{PIPELINE_VERSION}:{whisper_part}:{llm_part}"
 
+
+# =====================================================================
+# Downloader Service
+# =====================================================================
+
 class MediaDownloader:
     def __init__(self, storage_dir: Path):
         self.storage_dir = storage_dir
@@ -88,8 +197,9 @@ class MediaDownloader:
     def download_url(self, url: str, project_id: str, progress_callback=None) -> Dict[str, Any]:
         """
         Downloads video and audio for educational processing using yt-dlp.
-        Downloads at standard/medium resolution (480p) to optimize CPU/RAM/download speed.
-        Passes bundled FFmpeg to yt-dlp to allow merging separate video+audio streams without system FFmpeg.
+        Downloads at standard/medium resolution (<=480p) to optimize CPU/RAM/bandwidth.
+        Uses mobile player clients to avoid datacenter IP bot challenges without cookies.
+        Provides safe caption-only fallback if video streaming is restricted by YouTube.
         """
         start_time = time.time()
         proj_dir = self.storage_dir / project_id
@@ -110,7 +220,9 @@ class MediaDownloader:
             'quiet': True,
             'no_warnings': True,
             'skip_download': True,
+            'nocheckcertificate': True,
             'socket_timeout': 20,
+            'extractor_args': BASE_YTDL_EXTRACTOR_ARGS,
         }
         try:
             with yt_dlp.YoutubeDL(info_opts) as ydl:
@@ -120,27 +232,31 @@ class MediaDownloader:
                     if vid_duration > MAX_VIDEO_DURATION_SEC:
                         max_hrs = MAX_VIDEO_DURATION_SEC / 3600
                         curr_hrs = round(vid_duration / 3600, 1)
-                        raise ValueError(f"Video duration ({curr_hrs} hours) exceeds the maximum allowed limit of {max_hrs} hours for public processing.")
-        except ValueError:
+                        raise VideoDurationLimitError(curr_hrs, max_hrs)
+        except VideoDurationLimitError:
             raise
         except Exception as e:
-            logger.warning(f"Duration pre-check skipped due to: {e}")
+            logger.warning(f"Duration pre-check notice: {e}")
 
+        # Main download configuration with multi-client fallback
         ydl_opts = {
-            # 480p standard is ideal: sharp enough for clear slide OCR while cutting download size by ~70-80%
-            'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
+            # Prefer 480p or 360p progressive stream (format 18) for maximum stability
+            'format': 'best[height<=480]/18/bestvideo[height<=480]+bestaudio/best',
             'outtmpl': video_out,
             'merge_output_format': 'mp4',
             'ffmpeg_location': self.ffmpeg_exe,
             'quiet': True,
             'no_warnings': True,
+            'nocheckcertificate': True,
             'progress_hooks': [hook] if progress_callback else [],
             'noplaylist': True,
             'socket_timeout': 25,
             'retries': 3,
+            'fragment_retries': 3,
             'writesubtitles': True,
             'writeautomaticsub': True,
             'subtitleslangs': ['en'],
+            'extractor_args': BASE_YTDL_EXTRACTOR_ARGS,
         }
 
         try:
@@ -151,7 +267,7 @@ class MediaDownloader:
                 uploader = info.get('uploader', 'Instructor')
                 description = info.get('description', '')
 
-                # Find the actual downloaded file
+                # Find the downloaded video file
                 downloaded_file = None
                 for ext in ['mp4', 'mkv', 'webm']:
                     candidate = proj_dir / f"video.{ext}"
@@ -167,7 +283,7 @@ class MediaDownloader:
                 if not downloaded_file:
                     raise FileNotFoundError("Downloaded media file not found on disk.")
 
-                # Check for downloaded subtitles to accelerate transcription
+                # Check for downloaded subtitles
                 subtitle_file = None
                 vtt_files = list(proj_dir.glob("*.vtt"))
                 if vtt_files:
@@ -182,16 +298,55 @@ class MediaDownloader:
                     "description": description[:500] if description else "",
                     "video_path": downloaded_file,
                     "subtitle_path": subtitle_file,
+                    "has_video": True,
                     "download_sec": download_sec
                 }
-        except ValueError as ve:
-            raise RuntimeError(str(ve))
-        except yt_dlp.utils.DownloadError as e:
-            logger.error(f"Download error: {e}")
-            raise RuntimeError(f"Could not access or download video: {str(e)}")
+
+        except VideoDurationLimitError:
+            raise
         except Exception as e:
-            logger.error(f"Failed to process URL: {e}")
-            raise RuntimeError(f"Video download failed: {str(e)}")
+            err_str = str(e)
+            logger.warning(f"Full video download encountered issue: {err_str}. Attempting legitimate caption fallback...")
+
+            # SAFE CAPTION-ONLY FALLBACK:
+            # If the video stream itself cannot be obtained, check if public or auto captions
+            # can be legitimately retrieved without downloading the heavy video binary.
+            caption_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+                'nocheckcertificate': True,
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': ['en'],
+                'outtmpl': str(proj_dir / "caption.%(ext)s"),
+                'extractor_args': BASE_YTDL_EXTRACTOR_ARGS,
+                'socket_timeout': 20,
+            }
+            try:
+                with yt_dlp.YoutubeDL(caption_opts) as ydl_cap:
+                    cap_info = ydl_cap.extract_info(url, download=True)
+                    vtt_files = list(proj_dir.glob("*.vtt"))
+                    if vtt_files:
+                        logger.info(f"Safe caption fallback successful: {vtt_files[0]}")
+                        return {
+                            "title": cap_info.get('title', 'Educational Lecture'),
+                            "duration": float(cap_info.get('duration', 0.0) or 0.0),
+                            "uploader": cap_info.get('uploader', 'Instructor'),
+                            "description": cap_info.get('description', '')[:500] if cap_info.get('description') else "",
+                            "video_path": None,
+                            "subtitle_path": str(vtt_files[0]),
+                            "has_video": False,
+                            "notice": "Video visuals could not be downloaded; study workspace synthesized from verified lecture speech.",
+                            "download_sec": round(time.time() - start_time, 2)
+                        }
+            except Exception as cap_err:
+                logger.warning(f"Caption fallback was not available: {cap_err}")
+
+            # If both video download and caption fallback failed, classify error cleanly
+            classified = classify_yt_error(err_str)
+            logger.error(f"Classified YouTube acquisition error [{classified.error_code}]: {classified}")
+            raise classified
 
     def ingest_local_file(self, temp_file_path: str, filename: str, project_id: str) -> Dict[str, Any]:
         """
@@ -212,4 +367,5 @@ class MediaDownloader:
             "uploader": "Local User",
             "description": "User uploaded lecture file",
             "video_path": str(dest_path),
+            "has_video": True,
         }

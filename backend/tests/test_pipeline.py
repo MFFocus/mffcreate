@@ -247,6 +247,69 @@ def test_media_cleanup():
     shutil.rmtree(test_dir, ignore_errors=True)
     print("[PASS] test_media_cleanup (large video/audio pruned, slide images preserved)")
 
+def test_error_classification_and_codes():
+    from services.downloader import (
+        classify_yt_error, YouTubeBotCheckError, VideoPrivateError,
+        VideoUnavailableError, VideoAgeRestrictedError, VideoRegionRestrictedError,
+        MediaAcquisitionError, VideoDurationLimitError
+    )
+
+    # 1. Bot check classification
+    err1 = classify_yt_error("ERROR: [youtube] _AhNBAjbYNI: Sign in to confirm you’re not a bot. Use --cookies-from-browser or --cookies for the authentication.")
+    assert isinstance(err1, YouTubeBotCheckError)
+    assert err1.error_code == "YOUTUBE_BOT_CHECK"
+    assert "temporarily limiting automated access" in err1.user_message
+
+    # 2. Private video
+    err2 = classify_yt_error("ERROR: [youtube] 12345: This video is private.")
+    assert isinstance(err2, VideoPrivateError)
+    assert err2.error_code == "VIDEO_PRIVATE"
+    assert "set to private" in err2.user_message
+
+    # 3. Unavailable video
+    err3 = classify_yt_error("ERROR: [youtube] abcde: Video unavailable. This video has been removed by the uploader.")
+    assert isinstance(err3, VideoUnavailableError)
+    assert err3.error_code == "VIDEO_UNAVAILABLE"
+
+    # 4. Age restricted
+    err4 = classify_yt_error("ERROR: [youtube] xyz: Sign in to confirm your age. This video is age-restricted.")
+    assert isinstance(err4, VideoAgeRestrictedError)
+    assert err4.error_code == "VIDEO_AGE_RESTRICTED"
+
+    # 5. Region restricted
+    err5 = classify_yt_error("ERROR: [youtube] 999: This video is not available in your country.")
+    assert isinstance(err5, VideoRegionRestrictedError)
+    assert err5.error_code == "VIDEO_REGION_RESTRICTED"
+
+    # 6. Generic download error
+    err6 = classify_yt_error("ERROR: Network socket timeout during connection")
+    assert isinstance(err6, MediaAcquisitionError)
+    assert err6.error_code == "DOWNLOAD_FAILED"
+
+    # 7. Duration limit
+    err7 = VideoDurationLimitError(3.5, 2.5)
+    assert err7.error_code == "DURATION_EXCEEDED"
+    assert "3.5 hours" in err7.user_message
+
+    print("[PASS] test_error_classification_and_codes")
+
+def test_database_error_code_persistence():
+    from database import create_project, get_project, update_job_stage, delete_project
+    p_id = "err_test_1"
+    create_project(p_id, "Error Test Lecture", "url", source_url="https://youtube.com/watch?v=err123")
+    
+    update_job_stage(p_id, "failed", "Friendly failure message", 0, error="Detailed internal error", error_code="YOUTUBE_BOT_CHECK")
+    
+    proj = get_project(p_id)
+    assert proj is not None
+    assert proj["status"] == "failed"
+    assert proj["error"] == "Detailed internal error"
+    assert proj["error_code"] == "YOUTUBE_BOT_CHECK"
+    assert proj["stage"] == "Friendly failure message"
+    
+    delete_project(p_id)
+    print("[PASS] test_database_error_code_persistence")
+
 if __name__ == "__main__":
     print("\n--- RUNNING MFFCONVERT BACKEND INTEGRATION TESTS ---")
     test_database_lifecycle()
@@ -258,4 +321,6 @@ if __name__ == "__main__":
     test_url_canonicalization_and_caching()
     test_perceptual_hashing()
     test_media_cleanup()
+    test_error_classification_and_codes()
+    test_database_error_code_persistence()
     print("ALL TESTS PASSED SUCCESSFULLY! [OK]\n")

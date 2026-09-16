@@ -20,6 +20,25 @@ export const DiagramsTab: React.FC<DiagramsTabProps> = ({ keyframes, projectId, 
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
+  if (keyframes.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center p-12 text-center rounded-2xl border border-dashed border-slate-300 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/30">
+        <div className="rounded-full bg-purple-50 dark:bg-purple-950/50 p-4 mb-4 text-purple-600 dark:text-purple-400">
+          <ImageIcon className="h-8 w-8" />
+        </div>
+        <h3 className="text-base font-semibold text-slate-900 dark:text-white mb-2">
+          Visual Slides Unavailable
+        </h3>
+        <p className="max-w-md text-sm text-slate-600 dark:text-slate-400 leading-relaxed mb-4">
+          Visual slide capture was not available for this stream. All study notes, formulas, questions, and flashcards have been thoroughly synthesized directly from verified lecture speech and captions.
+        </p>
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 text-xs font-medium">
+          Speech & Audio Workspace Active
+        </div>
+      </div>
+    );
+  }
+
   const filtered = keyframes.filter((kf) =>
     filterType === 'all' ? true : kf.frame_type === filterType
   );
@@ -52,13 +71,18 @@ export const DiagramsTab: React.FC<DiagramsTabProps> = ({ keyframes, projectId, 
         </div>
       </div>
 
-      {/* Frame Gallery Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-        {filtered.map((kf, i) => (
-          <div
-            key={i}
-            className="group rounded-2xl border border-slate-200 bg-white overflow-hidden hover:border-purple-500/50 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/60 dark:hover:border-purple-500/40 transition-all flex flex-col justify-between"
-          >
+      {filtered.length === 0 ? (
+        <div className="p-8 text-center text-sm text-slate-500">
+          No frames found for category "{filterType}".
+        </div>
+      ) : (
+        /* Frame Gallery Grid */
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+          {filtered.map((kf, i) => (
+            <div
+              key={i}
+              className="group rounded-2xl border border-slate-200 bg-white overflow-hidden hover:border-purple-500/50 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/60 dark:hover:border-purple-500/40 transition-all flex flex-col justify-between"
+            >
             <div>
               {/* Image Container */}
               <div className="relative aspect-video w-full bg-slate-100 dark:bg-slate-950 overflow-hidden">
@@ -112,6 +136,7 @@ export const DiagramsTab: React.FC<DiagramsTabProps> = ({ keyframes, projectId, 
           </div>
         ))}
       </div>
+      )}
 
       {/* Full Modal Viewer */}
       {selectedFrame && (

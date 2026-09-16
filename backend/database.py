@@ -39,6 +39,7 @@ def init_db():
         stage TEXT DEFAULT 'Initialized',
         progress_pct INTEGER DEFAULT 0,
         error TEXT,
+        error_code TEXT,
         created_at TEXT NOT NULL,
         metadata_json TEXT,
         metrics_json TEXT
@@ -52,6 +53,8 @@ def init_db():
         cursor.execute("ALTER TABLE projects ADD COLUMN source_url_hash TEXT")
     if "metrics_json" not in columns:
         cursor.execute("ALTER TABLE projects ADD COLUMN metrics_json TEXT")
+    if "error_code" not in columns:
+        cursor.execute("ALTER TABLE projects ADD COLUMN error_code TEXT")
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS transcripts (
@@ -167,19 +170,32 @@ def update_job_stage(
     stage: str,
     progress_pct: int,
     error: Optional[str] = None,
-    metrics: Optional[Dict[str, Any]] = None
+    metrics: Optional[Dict[str, Any]] = None,
+    error_code: Optional[str] = None
 ):
-    """Updates fine-grained pipeline state and timing metrics."""
+    """Updates fine-grained pipeline state, error code, and timing metrics."""
     conn = get_db_connection()
     cursor = conn.cursor()
     metrics_json = json.dumps(metrics) if metrics else None
     
-    if metrics_json is not None:
+    if metrics_json is not None and error_code is not None:
+        cursor.execute("""
+        UPDATE projects 
+        SET status = ?, stage = ?, progress_pct = ?, error = ?, metrics_json = ?, error_code = ?
+        WHERE id = ?
+        """, (status, stage, progress_pct, error, metrics_json, error_code, project_id))
+    elif metrics_json is not None:
         cursor.execute("""
         UPDATE projects 
         SET status = ?, stage = ?, progress_pct = ?, error = ?, metrics_json = ?
         WHERE id = ?
         """, (status, stage, progress_pct, error, metrics_json, project_id))
+    elif error_code is not None:
+        cursor.execute("""
+        UPDATE projects 
+        SET status = ?, stage = ?, progress_pct = ?, error = ?, error_code = ?
+        WHERE id = ?
+        """, (status, stage, progress_pct, error, error_code, project_id))
     else:
         cursor.execute("""
         UPDATE projects 
